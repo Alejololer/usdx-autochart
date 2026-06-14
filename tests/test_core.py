@@ -14,7 +14,9 @@ from pipeline.assemble import assemble, syllabify_es  # noqa: E402
 from pipeline.usdx_writer import Chart, Line, Note  # noqa: E402
 import numpy as np  # noqa: E402
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Golden benchmarks live under benchmarks/ at the repo root.
+ROOT = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "benchmarks")
 DUET_DIR = os.path.join(ROOT, "Carlos Baute y Marta Sánchez - Colgando en tus manos")
 REFS = [
     os.path.join(ROOT, "Alejandro Sanz - Corazón partío",
