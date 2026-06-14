@@ -7,8 +7,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This file covers **`usdx-autochart/`** only — a standalone Python tool that turns an
 audio track into a singable UltraStar Deluxe song folder (an auto-draft for manual
 polish in the in-game editor). It does **not** modify the surrounding USDX Pascal
-codebase; it only targets USDX's `song.txt` file format. Treat the parent repo as
-read-only reference (the timing model is derived from `../src/base/`).
+codebase; it only targets USDX's `song.txt` file format. The timing model was
+derived from the upstream USDX Pascal source
+([UltraStar-Deluxe/USDX](https://github.com/UltraStar-Deluxe/USDX), `src/base/`);
+those formulas are inlined below, so this repo is self-contained.
 
 ## Commands
 
@@ -69,9 +71,10 @@ model.** Everything downstream of `assemble` operates on a `Chart`; `usdx_parse.
 reads a `song.txt` back into one (used by tests and `--eval`).
 
 ### Timing model — the one thing that must be exact
-Verified against the USDX Pascal source and asserted in `tests/test_core.py`:
-- `../src/base/USong.pas:1209`: `Song.BPM = fileBPM * 4`
-- `../src/base/UNote.pas` `GetTimeFromBeat`: `time = GAP/1000 + Beat*60/Song.BPM`
+Verified against the upstream USDX Pascal source and asserted in `tests/test_core.py`
+(paths are in the [UltraStar-Deluxe/USDX](https://github.com/UltraStar-Deluxe/USDX) repo):
+- `src/base/USong.pas:1209`: `Song.BPM = fileBPM * 4`
+- `src/base/UNote.pas` `GetTimeFromBeat`: `time = GAP/1000 + Beat*60/Song.BPM`
 - ⇒ one USDX beat = `15 / fileBPM` seconds; `beat = round((time - GAP/1000) / (15/fileBPM))`
 
 We write a deliberately high `#BPM` (the "file BPM", default `15/0.0625 = 240`) to get
@@ -124,7 +127,7 @@ diarization): both singers share one separated stem so CREPE tracks a single pit
 Re-checks the generated `Chart` against the rules USDX enforces before it will load a
 song (required headers, ≥1 non-freestyle note, monotonic beats, duration ≥ 1). Returns
 a list of problem strings; empty == USDX should load it. **Mirror any new USDX load
-rule here** when you find one in `../src/base/USong.pas`.
+rule here** when you find one in upstream `src/base/USong.pas`.
 
 ### Evaluation (evaluate.py)
 `--eval` scores the generated chart against a gold reference **entirely in the time
@@ -141,12 +144,14 @@ track; ties count correct so identical/unison charts score 1.0). The bundled
 `…Colgando…[MULTI].txt` (P1 Carlos / P2 Marta) is the duet ground truth.
 
 ### Benchmark charts
-Two hand-made charts in the parent repo are the standing benchmarks for generation
-quality — they exercise both code paths and `tests/test_core.py` parses them:
-- `../Alejandro Sanz - Corazón partío/` — **solo** benchmark. Should stay solo (single
-  performer). Reference replication: note-ratio ~1.10, match ~0.74, onset ~104 ms,
-  pitch corr ~0.56, lyric sim ~0.46.
-- `../Carlos Baute y Marta Sánchez - Colgando en tus manos/` — **duet** benchmark.
+Two hand-made charts under `benchmarks/` are the standing golden benchmarks for
+generation quality — they exercise both code paths and `tests/test_core.py` parses
+them. The full source folders (gold `.txt`, input `.mp3`, `.avi` video, covers) are
+committed via **Git LFS** so the benchmarks are runnable end-to-end:
+- `benchmarks/Alejandro Sanz - Corazón partío/` — **solo** benchmark. Should stay solo
+  (single performer). Reference replication: note-ratio ~1.10, match ~0.74, onset
+  ~104 ms, pitch corr ~0.56, lyric sim ~0.46.
+- `benchmarks/Carlos Baute y Marta Sánchez - Colgando en tus manos/` — **duet** benchmark.
   Should split into P1/P2. Reference replication: note-ratio ~1.05, match ~0.77;
   flattened pitch corr only ~0.25 — inherent, since both singers share one separated
   stem. The folder also ships a `[MULTI].txt` (P1 Carlos / P2 Marta) — use it with
@@ -159,9 +164,9 @@ quality — they exercise both code paths and `tests/test_core.py` parses them:
 
 Regenerate and score against either with `--eval`, e.g.:
 ```bash
-python generate.py "../Alejandro Sanz - Corazón partío/Alejandro Sanz - Corazón partío.mp3" \
+python generate.py "benchmarks/Alejandro Sanz - Corazón partío/Alejandro Sanz - Corazón partío.mp3" \
     --separate --device cuda --lang es \
-    --eval "../Alejandro Sanz - Corazón partío/Alejandro Sanz - Corazón partío.txt"
+    --eval "benchmarks/Alejandro Sanz - Corazón partío/Alejandro Sanz - Corazón partío.txt"
 ```
 When changing the pipeline, run both and check the metrics don't regress.
 

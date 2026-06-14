@@ -32,9 +32,9 @@ Needs `ffmpeg`/`ffprobe` on PATH.
 
 CLI:
 ```bash
-python generate.py "Alejandro Sanz - Corazón partío.mp3" \
+python generate.py "benchmarks/Alejandro Sanz - Corazón partío/Alejandro Sanz - Corazón partío.mp3" \
     --lang es --whisper small --outdir songs \
-    --eval "Alejandro Sanz - Corazón partío/Alejandro Sanz - Corazón partío.txt"
+    --eval "benchmarks/Alejandro Sanz - Corazón partío/Alejandro Sanz - Corazón partío.txt"
 ```
 
 Web upload:
@@ -50,7 +50,19 @@ python -m tests.test_core     # format math + writer/parser, no ML needed
 time domain (note-count ratio, onset error ms, relative-pitch contour
 correlation, lyric similarity) so differing BPM/GAP choices don't bias results.
 
+## Golden benchmarks
+
+`benchmarks/` ships two hand-made reference charts (gold `.txt` + input `.mp3` +
+`.avi` video + cover) used to track generation quality, committed via **Git LFS**
+(run `git lfs install` once, then `git lfs pull` to fetch the media):
+- **Solo** — `Alejandro Sanz - Corazón partío/` (should stay single-track).
+- **Duet** — `Carlos Baute y Marta Sánchez - Colgando en tus manos/` (should split
+  `P1`/`P2`; the `[MULTI].txt` is the per-singer gold — score it with `--eval-duet`).
+
+See `CLAUDE.md` for the expected metric ranges and how to regenerate/score both.
+
 ## Status / limits
-- Output is a **draft** — expect to fix timing/lyrics in `UScreenEditSub.pas`.
-- v1 emits a single solo track; duet `P1`/`P2` splitting is future work.
+- Output is a **draft** — expect to fix timing/lyrics in the in-game editor.
+- Duet `P1`/`P2` splitting is implemented (diarization + register clustering); see
+  `CLAUDE.md`. Separating two singers from one mixed vocal stem is the hard limit.
 - Accuracy depends on vocal clarity; `--separate` helps on dense mixes.
