@@ -1,0 +1,17 @@
+# Core (always needed)
+numpy>=1.24
+
+# Pitch + tempo (CPU, no GPU/torch)
+librosa>=0.10
+soundfile>=0.12
+
+# Lyrics + word timestamps (CPU, ctranslate2 - no torch)
+faster-whisper>=1.0
+
+# Optional vocal separation (heavy - pulls in torch). Install separately:
+#   pip install demucs
+
+# Optional web upload service
+fastapi>=0.110
+uvicorn>=0.29
+python-multipart>=0.0.9

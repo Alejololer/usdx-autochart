@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Generated song output
+songs/
+
+# Intermediate audio (separated stems, temp)
+*.wav
+
+# Model / HF caches if ever placed here
+.cache/
