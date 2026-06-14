@@ -11,6 +11,18 @@ faster-whisper>=1.0
 # Optional vocal separation (heavy - pulls in torch). Install separately:
 #   pip install demucs
 
+# Optional speaker diarization for per-voice duet (Phase 1). Needs an HF token
+# and accepting the model terms at hf.co/pyannote/speaker-diarization-3.1:
+#   pip install "pyannote.audio==3.3.2"   # NOT 4.x: it remaps 3.1 to the gated
+#       # speaker-diarization-community-1 repo and pulls torchcodec (broken on Win)
+#   export HF_TOKEN=...
+# Optional per-singer pitch during overlap (Phase 2, multi-f0):
+#   pip install basic-pitch                # pulls tensorflow; needs numpy<2
+#   pip install "numpy<2"                  # tensorflow 2.15 + pyannote 3.x both OK on 1.26
+# diarize.py shims a few torch>=2.9 / huggingface_hub>=1.0 / speechbrain 1.x
+# incompatibilities at runtime (see its docstring). All optional deps import
+# lazily and fall back gracefully, so a core install without them is unchanged.
+
 # Optional web upload service
 fastapi>=0.110
 uvicorn>=0.29

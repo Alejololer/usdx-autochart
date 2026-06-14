@@ -14,8 +14,8 @@ import os
 import shutil
 import sys
 
-from pipeline import (audio_io, align, assemble, evaluate, lyrics, lyrics_api,
-                      metadata, pitch, separate, tempo)
+from pipeline import (audio_io, align, assemble, diarize, evaluate, lyrics,
+                      lyrics_api, metadata, pitch, separate, tempo)
 from pipeline import usdx_parse, usdx_validate, usdx_writer
 
 
@@ -34,11 +34,22 @@ def main() -> int:
     ap.add_argument("--separate", action="store_true", help="run Demucs first")
     ap.add_argument("--device", default="auto", help="auto|cuda|cpu")
     ap.add_argument("--duet", default="auto", help="auto|yes|no (P1/P2 split)")
+    ap.add_argument("--diarize", default="auto",
+                    help="auto|yes|no - speaker diarization for the duet split "
+                         "(needs --separate + HF_TOKEN; falls back to clustering)")
+    ap.add_argument("--multif0", default="auto",
+                    help="auto|no - per-singer pitch via basic-pitch during overlap")
+    ap.add_argument("--unison", default="both",
+                    help="both|lead - duplicate shared (unison) lines into both tracks")
+    ap.add_argument("--adlibs", choices=["keep", "drop"], default="drop",
+                    help="drop ()-bracketed backing-vocal ad-libs from canonical lyrics")
     ap.add_argument("--no-lyrics-api", action="store_true",
                     help="skip LRCLIB canonical lyrics lookup")
     ap.add_argument("--outdir", default="songs")
     ap.add_argument("--grid", type=float, default=0.0625, help="seconds per beat")
     ap.add_argument("--eval", default=None, help="reference .txt to score against")
+    ap.add_argument("--eval-duet", default=None,
+                    help="reference .txt to score per-singer (P1/P2 attribution)")
     ap.add_argument("--dump-txt", default=None, help="also write the .txt here")
     args = ap.parse_args()
 
@@ -63,11 +74,13 @@ def main() -> int:
     log(f"duration {duration:.1f}s  title={title!r} artist={artist!r}")
 
     analysis_path = audio_path
+    vocals_wav = None
     if args.separate:
         log("separating vocals (Demucs)...")
         voc = separate.separate_vocals(audio_path)
         if voc:
             analysis_path = voc
+            vocals_wav = voc
             log(f"vocals: {voc}")
         else:
             log("Demucs unavailable; analysing the full mix")
@@ -107,11 +120,42 @@ def main() -> int:
         else:
             log("no canonical lyrics found; keeping Whisper transcription")
 
+    # speaker diarization for the duet split (needs the separated vocal stem).
+    diar = []
+    want_diar = args.diarize == "yes" or (
+        args.diarize == "auto" and assemble.is_multi_artist(artist))
+    if want_diar and args.duet != "no":
+        if vocals_wav:
+            log("diarizing singers (pyannote)...")
+            diar = diarize.diarize(vocals_wav, num_speakers=2, device=dev)
+            if diar:
+                spk = len({s for _, _, s in diar})
+                log(f"diarization: {len(diar)} segments, {spk} speakers")
+            else:
+                log("diarization unavailable; falling back to register clustering")
+        else:
+            log("diarization needs --separate (vocal stem); skipping")
+
+    # per-singer pitch during overlap (multi-f0 via basic-pitch)
+    pps = {}
+    if diar and args.multif0 != "no" and vocals_wav:
+        log("extracting per-singer pitch (basic-pitch)...")
+        pps = pitch.extract_pitch_per_speaker(vocals_wav, diar, device=dev)
+        if pps:
+            log(f"per-singer pitch tracks: {sorted(pps)}")
+
+    if not args.no_lyrics_api:
+        n_adlib = sum(1 for w in words if w.get("adlib"))
+        if n_adlib:
+            log(f"ad-libs flagged: {n_adlib} (policy: {args.adlibs})")
+
     log("assembling chart...")
     chart = assemble.assemble(
         words, pitch_track, duration,
         title=title, artist=artist, audio=os.path.basename(audio_path),
         target_grid_s=args.grid, language=args.lang.upper(), duet=args.duet,
+        diarization=diar, pitch_per_speaker=pps, unison=args.unison,
+        drop_adlibs=(args.adlibs == "drop"),
     )
     if chart.tracks:
         log(f"DUET detected -> P1 {len(chart.tracks[0])} lines, "
@@ -149,6 +193,15 @@ def main() -> int:
         ref = usdx_parse.read_file(args.eval)
         metrics = evaluate.evaluate(chart, ref)
         print(evaluate.format_report(metrics))
+
+    if args.eval_duet:
+        ref = usdx_parse.read_file(args.eval_duet, keep_tracks=True)
+        dm = evaluate.evaluate_duet(chart, ref)
+        if dm.get("duet"):
+            print(evaluate.format_report_duet(dm))
+        else:
+            log("--eval-duet needs a 2-track P1/P2 chart on both sides; "
+                "use --eval for the flattened score")
 
     return 0
 

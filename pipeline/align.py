@@ -7,6 +7,10 @@ separated stem) are dropped. Canonical line breaks become USDX sentence breaks.
 
 This makes the *text* deterministic (it's the looked-up lyric, not a guess)
 while keeping *timing* from the audio.
+
+Words bracketed as ``(...)`` in the canonical lyric (backing-vocal ad-libs) are
+flagged ``adlib=True`` so assemble can optionally drop them. This only works when
+canonical lyrics are found and aligned; with raw Whisper there is no paren signal.
 """
 from __future__ import annotations
 
@@ -27,11 +31,35 @@ def _clean_display(word: str) -> str:
     return word.strip().strip(".,;:!?\"“”()¿¡").strip()
 
 
+def _adlib_flags(raw_words: List[str]) -> List[bool]:
+    """Per-word flag: True if the word lies inside ``(...)`` parentheses.
+
+    Lyric databases bracket backing-vocal ad-libs, e.g. ``Te amo (te amo) ya``.
+    Depth is tracked across words so multi-word spans are covered. A word that
+    only opens or only closes a paren is itself part of the span. Unbalanced /
+    nested parens are handled gracefully (depth never goes below 0); an unclosed
+    ``(`` at line end keeps flagging the rest of that line (best-effort)."""
+    flags: List[bool] = []
+    depth = 0
+    for w in raw_words:
+        opens = w.count("(")
+        closes = w.count(")")
+        # inside if we entered with depth>0, or this word carries any paren
+        inside = depth > 0 or opens > 0 or closes > 0
+        depth = max(0, depth + opens - closes)
+        flags.append(inside)
+    return flags
+
+
 def tokenize_lines(lines: List[str]) -> List[dict]:
-    """[{text, key, line_index, new_line}] for every canonical word."""
+    """[{text, key, line_index, new_line, adlib}] for every canonical word.
+
+    ``adlib`` is detected from the raw ``(...)`` parentheses *before*
+    ``_clean_display`` strips them, so the display text/key stay clean."""
     toks: List[dict] = []
     for li, line in enumerate(lines):
         words = [w for w in re.split(r"\s+", line) if w.strip()]
+        flags = _adlib_flags(words)
         for wi, w in enumerate(words):
             disp = _clean_display(w)
             if not disp:
@@ -41,6 +69,7 @@ def tokenize_lines(lines: List[str]) -> List[dict]:
                 "key": _key(disp),
                 "line_index": li,
                 "new_line": (wi == 0 and li > 0),
+                "adlib": flags[wi],
             })
     return [t for t in toks if t["key"]]
 
@@ -78,14 +107,16 @@ def build_words(lyric_lines: List[str], whisper_words: List[dict]) -> Optional[L
         w = whisper_words[j]
         tok = match.get(j)
         if tok is not None:
-            text, line = tok["text"], tok["line_index"]
+            text, line, adlib = tok["text"], tok["line_index"], tok["adlib"]
         else:
-            text, line = w["text"].strip(), prev_line   # extra sung word (repeat/adlib)
+            # extra sung word with no canonical match; not a bracketed ad-lib
+            text, line, adlib = w["text"].strip(), prev_line, False
         out.append({
             "text": text,
             "start": float(w["start"]),
             "end": float(w["end"]),
             "line_index": line if line is not None else (prev_line or 0),
+            "adlib": adlib,
         })
         if line is not None:
             prev_line = line

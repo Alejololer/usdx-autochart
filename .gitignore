@@ -3,8 +3,9 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Generated song output
+# Generated song output (songs/, plus eval scratch dirs like songs_clust/)
 songs/
+songs_*/
 
 # Intermediate audio (separated stems, temp)
 *.wav

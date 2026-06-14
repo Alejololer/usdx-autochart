@@ -10,7 +10,11 @@ Inputs:
 
 Picks a beat grid, syllabifies each word, assigns a pitch per syllable, and
 groups words into sentences. With duet detection on, sentences are split between
-two singers by pitch register (deterministic 2-means) and written as P1/P2.
+two singers and written as P1/P2 - by speaker diarization when a `diarization`
+segment list is supplied (lead = earliest onset = P1), otherwise by pitch register
+(deterministic 2-means). `pitch_per_speaker` (Phase 2 multi-f0) gives each note its
+own singer's f0 where available; `unison` duplicates shared lines into both tracks;
+`drop_adlibs` removes ()-bracketed canonical ad-libs (flagged by align.py).
 """
 from __future__ import annotations
 
@@ -105,6 +109,88 @@ def _kmeans2(values: Sequence[float], iters: int = 25):
     return labels, lo, hi
 
 
+# --- speaker diarization helpers (Phase 1/3) ---------------------------------
+# Diarization is a list of (start_s, end_s, speaker_label) segments produced by
+# pipeline/diarize.py. These helpers map words/sentences to a speaker and decide
+# the P1/P2 track split when diarization is available; _kmeans2 stays the fallback.
+
+def _order_speakers(diarization) -> List[str]:
+    """Distinct speaker labels ordered by first onset (lead singer first)."""
+    first: dict = {}
+    for start, _end, spk in diarization:
+        if spk not in first or start < first[spk]:
+            first[spk] = start
+    return sorted(first, key=lambda s: (first[s], s))
+
+
+def _word_speaker(diarization, t0: float, t1: float) -> Optional[str]:
+    """Speaker of the segment with the most temporal overlap with [t0, t1);
+    if nothing overlaps, the nearest segment by gap. None if no diarization."""
+    if not diarization:
+        return None
+    best_spk, best_ov = None, 0.0
+    for start, end, spk in diarization:
+        ov = min(end, t1) - max(start, t0)
+        if ov > best_ov:
+            best_ov, best_spk = ov, spk
+    if best_spk is not None:
+        return best_spk
+    best_spk, best_gap = None, float("inf")
+    for start, end, spk in diarization:
+        gap = t0 - end if end < t0 else (start - t1 if start > t1 else 0.0)
+        if gap < best_gap:
+            best_gap, best_spk = gap, spk
+    return best_spk
+
+
+def _majority(speakers: Sequence[Optional[str]]) -> Optional[str]:
+    """Most common non-None speaker; deterministic tie-break by label."""
+    vals = [s for s in speakers if s is not None]
+    if not vals:
+        return None
+    return min(set(vals), key=lambda s: (-vals.count(s), s))
+
+
+def _assign_tracks_from_diarization(sentence_speakers, ordered) -> Optional[np.ndarray]:
+    """Map each sentence's majority speaker to track 0 (lead) / 1 (second).
+    Returns labels, or None if the split is too lopsided to trust (caller then
+    falls back to register clustering)."""
+    if len(ordered) < 2:
+        return None
+    lead, second = ordered[0], ordered[1]
+    labels = []
+    for spk in sentence_speakers:
+        labels.append(1 if spk == second else 0)  # unknown/third -> lead track
+    labels = np.asarray(labels, dtype=int)
+    share = float((labels == 1).mean())
+    if (labels == 1).sum() < 2 or (labels == 0).sum() < 2 or not (0.10 <= share <= 0.90):
+        return None
+    return labels
+
+
+def _speaker_active_fraction(diarization, spk, t0: float, t1: float) -> float:
+    if t1 <= t0:
+        return 0.0
+    covered = 0.0
+    for start, end, s in diarization:
+        if s != spk:
+            continue
+        covered += max(0.0, min(end, t1) - max(start, t0))
+    return covered / (t1 - t0)
+
+
+def _is_unison(sent: List[Note], diarization, lead, second,
+               t0: float, spb: float, thresh: float = 0.4) -> bool:
+    """A sentence is unison when both singers are active over >= thresh of its
+    span (used by the --unison policy)."""
+    if not sent or lead is None or second is None:
+        return False
+    s_start = t0 + sent[0].start_beat * spb
+    s_end = t0 + (sent[-1].start_beat + sent[-1].duration) * spb
+    return (_speaker_active_fraction(diarization, lead, s_start, s_end) >= thresh
+            and _speaker_active_fraction(diarization, second, s_start, s_end) >= thresh)
+
+
 def _build_track(sentences: List[List[Note]]) -> List[Line]:
     """Lines for one track, with '-' break beats (first line has none)."""
     lines: List[Line] = []
@@ -138,11 +224,18 @@ def assemble(
     p1: Optional[str] = None,
     p2: Optional[str] = None,
     duet_min_sep: float = 6.0,     # semitones between registers to call a duet
+    diarization: Optional[Sequence[Tuple[float, float, str]]] = None,
+    pitch_per_speaker: Optional[dict] = None,
+    unison: str = "both",          # "both" | "lead" (shared chorus lines)
+    drop_adlibs: bool = False,     # drop ()-bracketed canonical ad-libs
 ) -> Chart:
     times, f0, conf = pitch
     words = [w for w in words if w.get("text", "").strip()]
+    if drop_adlibs:
+        words = [w for w in words if not w.get("adlib")]
     if not words:
         raise ValueError("no words to assemble")
+    pps = pitch_per_speaker or {}
 
     bpm = round(15.0 / target_grid_s, 2)
     spb = 15.0 / bpm
@@ -169,6 +262,9 @@ def assemble(
         sylls = syllabify_es(w["text"])
         wstart, wend = w["start"], max(w["end"], w["start"] + 0.08)
         span = wend - wstart
+        # speaker for this word (Phase 1 attribution + Phase 2 per-voice pitch)
+        wspk = _word_speaker(diarization, wstart, wend) if diarization else None
+        spk_pitch = pps.get(wspk) if wspk is not None else None
         weights = [max(1, len(s)) for s in sylls]
         total = sum(weights)
         acc = 0.0
@@ -176,11 +272,16 @@ def assemble(
             sb = wstart + span * (acc / total)
             acc += wt
             se = wstart + span * (acc / total)
-            midi = _median_pitch(times, f0, conf, sb, se)
+            midi = None
+            if spk_pitch is not None:
+                midi = _median_pitch(spk_pitch[0], spk_pitch[1], spk_pitch[2], sb, se)
+            if midi is None:  # fall back to the shared mono pitch track
+                midi = _median_pitch(times, f0, conf, sb, se)
             text = (" " + s) if (si == 0 and wi > 0 and not new_sentence) else s
             raw.append({
                 "beat": to_beat(sb), "endbeat": to_beat(se), "midi": midi,
                 "text": text, "new_sentence": new_sentence and si == 0,
+                "speaker": wspk,
             })
 
     known = [r["midi"] for r in raw if r["midi"] is not None]
@@ -190,25 +291,31 @@ def assemble(
             r["midi"] = fallback
     offset = round(float(np.median([r["midi"] for r in raw]))) - 12
 
-    notes: List[Tuple[bool, Note]] = []
+    notes: List[Tuple[bool, Note, Optional[str]]] = []
     cursor = -1
     for r in raw:
         start = max(r["beat"], cursor + 1)
         dur = max(1, r["endbeat"] - r["beat"])
         cursor = start + dur
         notes.append((r["new_sentence"],
-                      Note(start, dur, int(round(r["midi"])) - offset, r["text"])))
+                      Note(start, dur, int(round(r["midi"])) - offset, r["text"]),
+                      r.get("speaker")))
 
-    # group into sentences
+    # group into sentences, tracking each sentence's majority speaker
     sentences: List[List[Note]] = []
+    sentence_speakers: List[Optional[str]] = []
     cur: List[Note] = []
-    for is_new, note in notes:
+    cur_spk: List[Optional[str]] = []
+    for is_new, note, spk in notes:
         if is_new and cur:
             sentences.append(cur)
-            cur = []
+            sentence_speakers.append(_majority(cur_spk))
+            cur, cur_spk = [], []
         cur.append(note)
+        cur_spk.append(spk)
     if cur:
         sentences.append(cur)
+        sentence_speakers.append(_majority(cur_spk))
 
     preview = round(min(duration * 0.25, max(0.0, t0 + 30 * spb)), 2) if duration > 0 else None
     base = dict(title=title, artist=artist, bpm=bpm, gap_ms=round(gap_ms),
@@ -218,11 +325,20 @@ def assemble(
     # --- duet decision ---
     # In "auto" mode only split when the artist string names multiple performers
     # (e.g. "Carlos Baute y Marta Sánchez"); a single wide-range singer must not
-    # be split. The pitch clustering then decides which singer sings each line.
+    # be split. Speaker diarization decides the split when available; pitch-register
+    # clustering (_kmeans2) is the deterministic fallback when it isn't.
     do_duet = False
     labels = None
+    used_diarization = False
+    ordered = _order_speakers(diarization) if diarization else []
     allow = duet == "yes" or (duet == "auto" and is_multi_artist(artist))
-    if allow and len(sentences) >= 6:
+
+    if allow and len(sentences) >= 6 and len(ordered) >= 2:
+        dl = _assign_tracks_from_diarization(sentence_speakers, ordered)
+        if dl is not None:
+            labels, do_duet, used_diarization = dl, True, True
+
+    if allow and not do_duet and len(sentences) >= 6:
         med = [float(np.median([n.pitch for n in s])) for s in sentences]
         labels, lo, hi = _kmeans2(med)
         share_hi = float(labels.mean())
@@ -230,14 +346,26 @@ def assemble(
             do_duet = True
 
     if do_duet:
-        t_lo = [s for s, lab in zip(sentences, labels) if lab == 0]
-        t_hi = [s for s, lab in zip(sentences, labels) if lab == 1]
         names = split_artists(artist)
-        # track 0 = low register, track 1 = high register; performers are usually
-        # listed lead-first, so name them in order when we have two.
+        # track 0 = lead (earliest onset when diarized, else low register);
+        # performers are usually listed lead-first, so name them in order.
         n1 = p1 or (names[0] if len(names) >= 2 else "Singer 1")
         n2 = p2 or (names[1] if len(names) >= 2 else "Singer 2")
-        return Chart(lines=[], tracks=[_build_track(t_lo), _build_track(t_hi)],
+        lead = ordered[0] if used_diarization else None
+        second = ordered[1] if used_diarization else None
+        t1: List[List[Note]] = []
+        t2: List[List[Note]] = []
+        for sent, lab in zip(sentences, labels):
+            # unison policy only applies when we have diarization to detect it
+            if (used_diarization and unison == "both"
+                    and _is_unison(sent, diarization, lead, second, t0, spb)):
+                t1.append(sent)
+                t2.append(sent)
+            elif lab == 0:
+                t1.append(sent)
+            else:
+                t2.append(sent)
+        return Chart(lines=[], tracks=[_build_track(t1), _build_track(t2)],
                      p1=n1, p2=n2, **base)
 
     return Chart(lines=_build_track(sentences), **base)

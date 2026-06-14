@@ -17,8 +17,8 @@ import zipfile
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 
-from pipeline import (audio_io, align, assemble, lyrics, lyrics_api, metadata,
-                      pitch, separate)
+from pipeline import (audio_io, align, assemble, diarize, lyrics, lyrics_api,
+                      metadata, pitch, separate)
 from pipeline import usdx_validate, usdx_writer
 
 app = FastAPI(title="usdx-autochart")
@@ -49,7 +49,9 @@ PAGE = """
   <input type=file name=audio required accept="audio/*"><br><br>
   Title <input name=title> Artist <input name=artist>
   Lang <input name=lang value=es size=3>
-  <label><input type=checkbox name=separate> separate vocals</label><br><br>
+  <label><input type=checkbox name=separate checked> separate vocals</label>
+  <label><input type=checkbox name=diarize checked> diarize singers</label>
+  <label><input type=checkbox name=adlibs checked> drop ad-libs</label><br><br>
   <button>Generate</button>
 </form>
 <pre id=out></pre>
@@ -68,17 +70,21 @@ async function poll(job){const r=await fetch('/status/'+job);const s=await r.jso
 
 
 def run_job(job_id: str, audio_path: str, title: str, artist: str,
-            lang: str, do_separate: bool) -> None:
+            lang: str, do_separate: bool, do_diarize: str = "auto",
+            unison: str = "both", adlibs: str = "drop") -> None:
     job = JOBS[job_id]
     try:
         job.update(status="analyzing", stage="duration")
         duration = audio_io.duration_seconds(audio_path)
 
         analysis = audio_path
+        vocals_wav = None
         if do_separate:
             job["stage"] = "separating"
             voc = separate.separate_vocals(audio_path)
-            analysis = voc or audio_path
+            if voc:
+                analysis = voc
+                vocals_wav = voc
 
         job["stage"] = "pitch"
         audio, sr = audio_io.load_mono(analysis, sr=16000)
@@ -93,11 +99,24 @@ def run_job(job_id: str, audio_path: str, title: str, artist: str,
             if aligned:
                 words = aligned
 
+        # speaker diarization (+ per-singer pitch) for the duet split
+        diar = []
+        want_diar = do_diarize == "yes" or (
+            do_diarize == "auto" and assemble.is_multi_artist(artist))
+        if want_diar and vocals_wav:
+            job["stage"] = "diarize"
+            diar = diarize.diarize(vocals_wav, num_speakers=2)
+        pps = {}
+        if diar and vocals_wav:
+            job["stage"] = "multif0"
+            pps = pitch.extract_pitch_per_speaker(vocals_wav, diar)
+
         job["stage"] = "assemble"
         chart = assemble.assemble(
             words, ptrack, duration, title=title, artist=artist,
             audio=os.path.basename(audio_path), language=lang.upper(),
-            duet="auto",
+            duet="auto", diarization=diar, pitch_per_speaker=pps,
+            unison=unison, drop_adlibs=(adlibs == "drop"),
         )
         problems = usdx_validate.validate(chart)
 
@@ -133,7 +152,8 @@ def index() -> str:
 @app.post("/upload")
 async def upload(audio: UploadFile = File(...), title: str = Form(""),
                  artist: str = Form(""), lang: str = Form("es"),
-                 separate: bool = Form(False)) -> JSONResponse:
+                 separate: bool = Form(False), diarize: bool = Form(False),
+                 adlibs: bool = Form(False)) -> JSONResponse:
     job_id = uuid.uuid4().hex[:12]
     job_dir = os.path.join(WORK, job_id)
     os.makedirs(job_dir, exist_ok=True)
@@ -150,9 +170,12 @@ async def upload(audio: UploadFile = File(...), title: str = Form(""),
     artist = safe_component(artist or r_artist, "Unknown")
 
     JOBS[job_id] = {"status": "queued", "stage": "queued"}
-    threading.Thread(target=run_job,
-                     args=(job_id, audio_path, title, artist, lang, separate),
-                     daemon=True).start()
+    threading.Thread(
+        target=run_job,
+        args=(job_id, audio_path, title, artist, lang, separate),
+        kwargs={"do_diarize": "auto" if diarize else "no",
+                "adlibs": "drop" if adlibs else "keep"},
+        daemon=True).start()
     return JSONResponse({"job": job_id})
 
 
