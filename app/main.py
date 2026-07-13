@@ -76,7 +76,7 @@ PAGE = """
     <label><input type=checkbox name=adlibs checked> drop ad-libs</label><br><br>
     Whisper model <select name=whisper>
       <option>tiny</option><option>base</option><option selected>small</option>
-      <option>medium</option><option>large-v3</option>
+      <option>medium</option><option>large-v3-turbo</option><option>large-v3</option>
     </select>
     <details style="display:inline-block;margin-left:1em"><summary>advanced</summary>
       Unison lines <select name=unison>
@@ -242,7 +242,8 @@ async def upload(audio: UploadFile = File(...), title: str = Form(""),
     artist = safe_component(artist or r_artist, "Unknown")
 
     # whitelist client-supplied option strings (trust boundary)
-    if whisper not in ("tiny", "base", "small", "medium", "large-v3"):
+    if whisper not in ("tiny", "base", "small", "medium", "large-v3",
+                       "large-v3-turbo"):
         whisper = "small"
     mode = mode if mode in ("auto", "yes", "no") else "auto"
     unison = unison if unison in ("both", "lead") else "both"
