@@ -45,6 +45,9 @@ def main() -> int:
                     help="drop ()-bracketed backing-vocal ad-libs from canonical lyrics")
     ap.add_argument("--no-lyrics-api", action="store_true",
                     help="skip LRCLIB canonical lyrics lookup")
+    ap.add_argument("--lyrics-file", default=None,
+                    help="UTF-8 text file of canonical lyrics (one line per "
+                         "sung line); takes precedence over LRCLIB")
     ap.add_argument("--outdir", default="songs")
     ap.add_argument("--grid", type=float, default=0.0625, help="seconds per beat")
     ap.add_argument("--eval", default=None, help="reference .txt to score against")
@@ -108,8 +111,23 @@ def main() -> int:
     log(f"whisper words: {len(words)}")
 
     # Deterministic recognition: replace Whisper's guessed text with canonical
-    # lyrics looked up by artist/title, keeping Whisper's audio-derived timing.
-    if not args.no_lyrics_api:
+    # lyrics, keeping Whisper's audio-derived timing. A user-supplied lyrics
+    # file takes precedence over the LRCLIB lookup.
+    warnings = []
+    lyric_source = "whisper"
+    if args.lyrics_file:
+        with open(args.lyrics_file, encoding="utf-8-sig") as f:
+            lines = [l.strip() for l in f.read().splitlines() if l.strip()]
+        aligned = align.build_words(lines, words)
+        if aligned:
+            log(f"aligned to lyrics file: {len(aligned)} words "
+                f"({len(lines)} lines)")
+            words = aligned
+            lyric_source = "pasted"
+        else:
+            log("lyrics file alignment too weak; ignoring it")
+            warnings.append("lyrics file did not align with the audio; ignored")
+    if lyric_source == "whisper" and not args.no_lyrics_api:
         log("looking up canonical lyrics (LRCLIB)...")
         canon = lyrics_api.fetch_lyrics(artist, title, duration)
         if canon:
@@ -118,10 +136,15 @@ def main() -> int:
                 log(f"aligned to canonical lyrics: {len(aligned)} words "
                     f"({len(canon['lines'])} lines)")
                 words = aligned
+                lyric_source = "lrclib"
             else:
                 log("alignment too weak; keeping Whisper transcription")
         else:
             log("no canonical lyrics found; keeping Whisper transcription")
+    warn = lyrics.low_words_warning(len(words), duration)
+    if warn:
+        log(f"WARNING: {warn}")
+        warnings.append(warn)
 
     # speaker diarization for the duet split (needs the separated vocal stem).
     diar = []
@@ -147,7 +170,7 @@ def main() -> int:
         if pps:
             log(f"per-singer pitch tracks: {sorted(pps)}")
 
-    if not args.no_lyrics_api:
+    if lyric_source != "whisper":
         n_adlib = sum(1 for w in words if w.get("adlib"))
         if n_adlib:
             log(f"ad-libs flagged: {n_adlib} (policy: {args.adlibs})")
@@ -164,9 +187,9 @@ def main() -> int:
         log(f"DUET detected -> P1 {len(chart.tracks[0])} lines, "
             f"P2 {len(chart.tracks[1])} lines")
 
-    problems = usdx_validate.validate(chart)
+    problems = usdx_validate.validate(chart) + warnings
     if problems:
-        log("VALIDATION PROBLEMS:")
+        log("PROBLEMS:")
         for p in problems:
             log(f"  - {p}")
     else:

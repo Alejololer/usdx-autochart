@@ -6,6 +6,17 @@ from __future__ import annotations
 from typing import List, Optional
 
 
+def low_words_warning(n_words: int, duration_s: float) -> Optional[str]:
+    """Warn when transcription found implausibly few words (Whisper collapse on
+    heavily processed vocals) so users retry instead of trusting the draft."""
+    # ponytail: fixed 15 wpm threshold; make it a flag if it ever misfires
+    if duration_s > 60 and n_words / (duration_s / 60) < 15:
+        return (f"only {n_words} words in {duration_s:.0f}s — transcription "
+                "likely failed; retry with different options (whisper size, "
+                "separate on/off) or paste the lyrics")
+    return None
+
+
 def _pick_device(prefer: str = "auto") -> str:
     if prefer != "auto":
         return prefer

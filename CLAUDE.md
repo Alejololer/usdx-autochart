@@ -27,7 +27,8 @@ python generate.py "Artist - Title.mp3" --lang es --whisper small --outdir songs
 # Web upload service (same pipeline, one job per upload, returns a zip).
 # The form exposes the pipeline knobs (mode solo/duet/auto, language incl.
 # auto-detect, Whisper size, separate/diarize/adlibs, unison, multif0,
-# lyrics-API) and polls /status for a result summary before download.
+# lyrics-API, paste-lyrics textarea) and polls /status for a result summary
+# (incl. lyric_source pasted/lrclib/whisper + warnings) before download.
 uvicorn app.main:app                    # http://127.0.0.1:8000
 
 # Batch accuracy eval against an existing karaoke library
@@ -41,8 +42,14 @@ python -m tests.test_core               # run from usdx-autochart/
 ```
 
 `generate.py --lang auto` lets Whisper auto-detect the language;
+`--lyrics-file PATH` feeds user-supplied canonical lyrics (one line per sung
+line) to `align.build_words`, taking precedence over LRCLIB;
 `--eval-json PATH` dumps the `--eval`/`--eval-duet` metrics as JSON
-(the duet metrics under key `"duet"`, plus `gen_is_duet` and `problems`).
+(the duet metrics under key `"duet"`, plus `gen_is_duet` and `problems` —
+which also carries a low-words warning when transcription found <15
+words/minute). `batch_eval.py --duets-only` samples only folders with a
+`[MULTI].txt` duet reference; `--diarize auto|yes|no` is passed through to
+generate.py and keyed into the run dir (for diarization-vs-clustering A/B).
 
 There is no pytest harness; `tests/test_core.py` is a plain script with `assert`s
 and `print`s, run as a module. Run individual checks by calling their `test_*`
@@ -147,7 +154,9 @@ rule here** when you find one in upstream `src/base/USong.pas`.
 domain** (seconds), so differing BPM/GAP choices don't bias results. Reports note-count
 ratio, onset error (ms), relative-pitch contour correlation (medians subtracted), and
 lyric similarity. It **flattens** both tracks (`_flatten`), so it can't measure singer
-attribution.
+attribution. **Japanese caveat:** `lyric_similarity` reads ≈0 against romaji gold
+charts because Whisper emits kana/kanji — a scoring artifact, not a generation bug;
+judge ja songs by the timing metrics.
 
 `--eval-duet REF` scores per-singer: `usdx_parse.read_file(ref, keep_tracks=True)` keeps
 the P1/P2 blocks (default parse still flattens, for back-compat), then `evaluate_duet`
@@ -189,12 +198,20 @@ When changing the pipeline, run both and check the metrics don't regress.
 splits; medians match 0.60, onset ~131 ms, pitch corr 0.50, lyric sim 0.20.
 Full analysis, root causes, and follow-ups: `FINDINGS-2026-07-13.md`.
 Rerun with the same seed/n before and after pipeline changes to compare.
+Duet A/B on 12 library `[MULTI]` duets (same day, `--duets-only`): diarization
+split 4/6 multi-artist-named duets (saa median 0.627) vs clustering's 2 —
+coverage, not accuracy, is diarization's win; 6/12 duets have single-name
+artists so `is_multi_artist` never tries (open gap).
 
 ## Conventions / gotchas
 
 - **`song.txt` is written CRLF, UTF-8** (`usdx_writer.write`). The required headers are
   `#TITLE`, `#ARTIST`, `#BPM`, and `#AUDIO` (USDX refuses to load otherwise); `#MP3` is
   emitted as a backward-compat alias.
+- **Never pass `text=True` when capturing ffprobe/ffmpeg output** — on Windows
+  it decodes with the locale codec (cp1252) and un-decodable ID3 tag bytes kill
+  the pipe reader (`stdout=None`). Use `encoding="utf-8", errors="replace"`
+  (see `metadata.read_tags`).
 - **Never call `torchaudio.save`.** torch ≥2.9 routes it through `torchcodec`, which is
   painful on Windows. `separate.py` deliberately runs Demucs as a library
   (`apply_model`), decodes via the ffmpeg CLI, and writes stems with `soundfile`.

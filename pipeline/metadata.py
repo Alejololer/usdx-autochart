@@ -14,8 +14,10 @@ def read_tags(path: str) -> dict:
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries",
          "format_tags=title,artist,album", "-of", "default=noprint_wrappers=1", path],
-        capture_output=True, text=True,
-    ).stdout
+        # ffprobe emits UTF-8; text=True would use the locale codec (cp1252 on
+        # Windows), whose decode errors kill the pipe reader and leave stdout None
+        capture_output=True, encoding="utf-8", errors="replace",
+    ).stdout or ""
     tags: dict = {}
     for line in out.splitlines():
         if "=" in line:
@@ -46,8 +48,8 @@ def _has_embedded_art(path: str) -> bool:
         ["ffprobe", "-v", "error", "-select_streams", "v",
          "-show_entries", "stream_disposition=attached_pic",
          "-of", "default=noprint_wrappers=1:nokey=1", path],
-        capture_output=True, text=True,
-    ).stdout
+        capture_output=True, encoding="utf-8", errors="replace",
+    ).stdout or ""
     return "1" in out.split()
 
 

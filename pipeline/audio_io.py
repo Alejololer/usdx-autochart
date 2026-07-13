@@ -23,7 +23,8 @@ def duration_seconds(path: str) -> float:
         "ffprobe", "-v", "error", "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1", path,
     ]
-    out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
+    out = subprocess.run(cmd, capture_output=True, encoding="utf-8",
+                         errors="replace", check=True).stdout
     try:
         return float(out.strip())
     except ValueError:

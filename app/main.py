@@ -66,6 +66,9 @@ PAGE = """
       <option value=no>solo</option>
       <option value=yes>duet (P1/P2)</option>
     </select>
+    <br><br>Lyrics (optional — paste when LRCLIB misses the song; one line per sung line)<br>
+    <textarea name=lyrics_text rows=4 style="width:100%"
+      placeholder="Overrides the LRCLIB lookup. Line breaks become karaoke line breaks."></textarea>
   </fieldset>
   <fieldset><legend>Analysis</legend>
     <label><input type=checkbox name=separate checked> separate vocals (Demucs)</label>
@@ -99,9 +102,10 @@ function esc(t){const d=document.createElement('div');d.textContent=t??'';return
 function summary(s,job){
  let h='<b>'+(s.duet?'DUET (P1/P2)':'SOLO')+'</b> — '+s.notes+' notes / '
    +s.lines+' lines, '+Math.round(s.duration||0)+'s<br>';
- h+='lyrics: '+(s.canonical?'canonical (LRCLIB)':'Whisper transcription')+'<br>';
+ h+='lyrics: '+({pasted:'pasted (aligned)',lrclib:'canonical (LRCLIB)'}[s.lyric_source]
+   ||'Whisper transcription')+'<br>';
  h+=s.problems&&s.problems.length
-   ?'<span class=bad>validation problems:<br> - '+s.problems.map(esc).join('<br> - ')+'</span><br>'
+   ?'<span class=bad>problems:<br> - '+s.problems.map(esc).join('<br> - ')+'</span><br>'
    :'<span class=ok>validation OK</span><br>';
  h+='<br><a href="/download/'+job+'"><button>Download song folder (zip)</button></a>';
  return h;}
@@ -113,7 +117,7 @@ def run_job(job_id: str, audio_path: str, title: str, artist: str,
             lang: str, do_separate: bool, do_diarize: str = "auto",
             duet: str = "auto", whisper: str = "small", unison: str = "both",
             adlibs: str = "drop", multif0: str = "auto",
-            use_lyrics_api: bool = True) -> None:
+            use_lyrics_api: bool = True, lyrics_text: str = "") -> None:
     job = JOBS[job_id]
     try:
         job.update(status="analyzing", stage="duration")
@@ -135,15 +139,29 @@ def run_job(job_id: str, audio_path: str, title: str, artist: str,
         job["stage"] = "lyrics"
         wlang = None if lang == "auto" else lang
         words = lyrics.transcribe_words(analysis, model_size=whisper, language=wlang)
-        # deterministic recognition: replace text with canonical lyrics if found
-        canonical = False
-        if use_lyrics_api:
+        # deterministic recognition: replace text with canonical lyrics —
+        # pasted lyrics take precedence over the LRCLIB lookup
+        warnings = []
+        lyric_source = "whisper"
+        pasted = [l.strip() for l in lyrics_text.splitlines() if l.strip()]
+        if pasted:
+            aligned = align.build_words(pasted, words)
+            if aligned:
+                words = aligned
+                lyric_source = "pasted"
+            else:
+                warnings.append("pasted lyrics did not align with the audio; "
+                                "ignored")
+        if lyric_source == "whisper" and use_lyrics_api:
             canon = lyrics_api.fetch_lyrics(artist, title, duration)
             if canon:
                 aligned = align.build_words(canon["lines"], words)
                 if aligned:
                     words = aligned
-                    canonical = True
+                    lyric_source = "lrclib"
+        warn = lyrics.low_words_warning(len(words), duration)
+        if warn:
+            warnings.append(warn)
 
         # speaker diarization (+ per-singer pitch) for the duet split
         diar = []
@@ -165,7 +183,7 @@ def run_job(job_id: str, audio_path: str, title: str, artist: str,
             duet=duet, diarization=diar, pitch_per_speaker=pps,
             unison=unison, drop_adlibs=(adlibs == "drop"),
         )
-        problems = usdx_validate.validate(chart)
+        problems = usdx_validate.validate(chart) + warnings
 
         song_dir = os.path.join(WORK, job_id, f"{artist} - {title}")
         os.makedirs(song_dir, exist_ok=True)
@@ -187,7 +205,7 @@ def run_job(job_id: str, audio_path: str, title: str, artist: str,
                    notes=sum(len(l.notes) for tr in tracks for l in tr),
                    lines=sum(len(tr) for tr in tracks),
                    duet=bool(chart.tracks), duration=duration,
-                   canonical=canonical,
+                   lyric_source=lyric_source,
                    words=len(words), problems=problems)
     except Exception as e:  # noqa: BLE001
         job.update(status="error", error=repr(e))
@@ -205,7 +223,8 @@ async def upload(audio: UploadFile = File(...), title: str = Form(""),
                  unison: str = Form("both"),
                  separate: bool = Form(False), diarize: bool = Form(False),
                  adlibs: bool = Form(False), multif0: bool = Form(False),
-                 lyrics_api: bool = Form(False)) -> JSONResponse:
+                 lyrics_api: bool = Form(False),
+                 lyrics_text: str = Form("")) -> JSONResponse:
     job_id = uuid.uuid4().hex[:12]
     job_dir = os.path.join(WORK, job_id)
     os.makedirs(job_dir, exist_ok=True)
@@ -227,6 +246,7 @@ async def upload(audio: UploadFile = File(...), title: str = Form(""),
     mode = mode if mode in ("auto", "yes", "no") else "auto"
     unison = unison if unison in ("both", "lead") else "both"
     lang = lang if re.fullmatch(r"[a-z]{2}|auto", lang or "") else "es"
+    lyrics_text = (lyrics_text or "")[:20000]  # cap pasted lyrics (trust boundary)
 
     JOBS[job_id] = {"status": "queued", "stage": "queued"}
     threading.Thread(
@@ -236,7 +256,7 @@ async def upload(audio: UploadFile = File(...), title: str = Form(""),
                 "duet": mode, "whisper": whisper, "unison": unison,
                 "adlibs": "drop" if adlibs else "keep",
                 "multif0": "auto" if multif0 else "no",
-                "use_lyrics_api": lyrics_api},
+                "use_lyrics_api": lyrics_api, "lyrics_text": lyrics_text},
         daemon=True).start()
     return JSONResponse({"job": job_id})
 

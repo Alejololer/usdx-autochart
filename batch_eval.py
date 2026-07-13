@@ -75,7 +75,8 @@ def slugify(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_")[:80]
 
 
-def run_song(song: dict, run_dir: str, device: str, timeout: int) -> None:
+def run_song(song: dict, run_dir: str, device: str, timeout: int,
+             diarize: str | None = None) -> None:
     slug = slugify(song["name"])
     result_json = os.path.join(run_dir, "results", f"{slug}.json")
     error_json = os.path.join(run_dir, "results", f"{slug}.error.json")
@@ -90,6 +91,8 @@ def run_song(song: dict, run_dir: str, device: str, timeout: int) -> None:
            "--eval", song["gold"], "--eval-json", result_json]
     if song["multi"]:
         cmd += ["--eval-duet", song["multi"]]
+    if diarize:
+        cmd += ["--diarize", diarize]
 
     print(f"  [run ] {song['name']} (lang={lang}"
           f"{', duet-ref' if song['multi'] else ''})")
@@ -176,22 +179,32 @@ def main() -> int:
     ap.add_argument("--timeout", type=int, default=900, help="per-song seconds")
     ap.add_argument("--aggregate-only", action="store_true",
                     help="just rebuild results.csv + summary from existing JSONs")
+    ap.add_argument("--duets-only", action="store_true",
+                    help="sample only songs with a [MULTI].txt duet reference")
+    ap.add_argument("--diarize", default=None, choices=["auto", "yes", "no"],
+                    help="pass --diarize to generate.py (run dir keyed by it)")
     args = ap.parse_args()
 
     songs = scan_library(args.lib)
-    print(f"library: {len(songs)} usable song folders in {args.lib}")
+    if args.duets_only:
+        songs = [s for s in songs if s["multi"]]
+    print(f"library: {len(songs)} usable song folders in {args.lib}"
+          f"{' (duets only)' if args.duets_only else ''}")
     if not songs:
         return 2
     sample = random.Random(args.seed).sample(songs, min(args.n, len(songs)))
 
-    run_dir = os.path.join("eval_runs", f"n{args.n}-seed{args.seed}")
+    key = (f"n{args.n}-seed{args.seed}"
+           + ("-duets" if args.duets_only else "")
+           + (f"-diar{args.diarize}" if args.diarize else ""))
+    run_dir = os.path.join("eval_runs", key)
     for sub in ("results", "logs", "songs"):
         os.makedirs(os.path.join(run_dir, sub), exist_ok=True)
 
     if not args.aggregate_only:
         for i, song in enumerate(sample, 1):
             print(f"[{i}/{len(sample)}]")
-            run_song(song, run_dir, args.device, args.timeout)
+            run_song(song, run_dir, args.device, args.timeout, args.diarize)
 
     aggregate(sample, run_dir)
     return 0
