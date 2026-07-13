@@ -44,34 +44,76 @@ def safe_audio_name(filename: str | None) -> str:
 
 PAGE = """
 <!doctype html><meta charset=utf-8><title>USDX Autochart</title>
+<style>
+ body{font-family:system-ui,sans-serif;max-width:640px;margin:2em auto;padding:0 1em}
+ fieldset{border:1px solid #ccc;margin-bottom:1em}
+ label{margin-right:1em} .ok{color:#080} .bad{color:#c00}
+ #out{background:#f6f6f6;padding:1em;white-space:pre-wrap}
+</style>
 <h2>UltraStar auto-chart</h2>
 <form id=f>
-  <input type=file name=audio required accept="audio/*"><br><br>
-  Title <input name=title> Artist <input name=artist>
-  Lang <input name=lang value=es size=3>
-  <label><input type=checkbox name=separate checked> separate vocals</label>
-  <label><input type=checkbox name=diarize checked> diarize singers</label>
-  <label><input type=checkbox name=adlibs checked> drop ad-libs</label><br><br>
+  <fieldset><legend>Song</legend>
+    <input type=file name=audio required accept="audio/*"><br><br>
+    Title <input name=title> Artist <input name=artist><br><br>
+    Language <select name=lang>
+      <option value=es selected>Spanish</option><option value=en>English</option>
+      <option value=fr>French</option><option value=de>German</option>
+      <option value=it>Italian</option><option value=pt>Portuguese</option>
+      <option value=ja>Japanese</option><option value=auto>auto-detect</option>
+    </select>
+    Mode <select name=mode>
+      <option value=auto selected>auto (duet if multi-artist)</option>
+      <option value=no>solo</option>
+      <option value=yes>duet (P1/P2)</option>
+    </select>
+  </fieldset>
+  <fieldset><legend>Analysis</legend>
+    <label><input type=checkbox name=separate checked> separate vocals (Demucs)</label>
+    <label><input type=checkbox name=diarize checked> diarize singers</label>
+    <label><input type=checkbox name=adlibs checked> drop ad-libs</label><br><br>
+    Whisper model <select name=whisper>
+      <option>tiny</option><option>base</option><option selected>small</option>
+      <option>medium</option><option>large-v3</option>
+    </select>
+    <details style="display:inline-block;margin-left:1em"><summary>advanced</summary>
+      Unison lines <select name=unison>
+        <option value=both selected>both tracks</option><option value=lead>lead only</option>
+      </select>
+      <label><input type=checkbox name=multif0 checked> per-singer pitch</label>
+      <label><input type=checkbox name=lyrics_api checked> canonical lyrics (LRCLIB)</label>
+    </details>
+  </fieldset>
   <button>Generate</button>
 </form>
-<pre id=out></pre>
+<div id=out></div>
 <script>
 const f=document.getElementById('f'), out=document.getElementById('out');
 f.onsubmit=async e=>{e.preventDefault();out.textContent='uploading...';
  const r=await fetch('/upload',{method:'POST',body:new FormData(f)});
  const {job}=await r.json(); poll(job);};
 async function poll(job){const r=await fetch('/status/'+job);const s=await r.json();
- out.textContent=JSON.stringify(s,null,2);
- if(s.status==='done'){out.textContent+='\\n\\nDownload: /download/'+job;}
- else if(s.status==='error'){}
- else setTimeout(()=>poll(job),1500);}
+ if(s.status==='done'){out.innerHTML=summary(s,job);}
+ else if(s.status==='error'){out.innerHTML='<span class=bad>error: '+esc(s.error)+'</span>';}
+ else{out.textContent='working... stage: '+s.stage;setTimeout(()=>poll(job),1500);}}
+function esc(t){const d=document.createElement('div');d.textContent=t??'';return d.innerHTML;}
+function summary(s,job){
+ let h='<b>'+(s.duet?'DUET (P1/P2)':'SOLO')+'</b> — '+s.notes+' notes / '
+   +s.lines+' lines, '+Math.round(s.duration||0)+'s<br>';
+ h+='lyrics: '+(s.canonical?'canonical (LRCLIB)':'Whisper transcription')+'<br>';
+ h+=s.problems&&s.problems.length
+   ?'<span class=bad>validation problems:<br> - '+s.problems.map(esc).join('<br> - ')+'</span><br>'
+   :'<span class=ok>validation OK</span><br>';
+ h+='<br><a href="/download/'+job+'"><button>Download song folder (zip)</button></a>';
+ return h;}
 </script>
 """
 
 
 def run_job(job_id: str, audio_path: str, title: str, artist: str,
             lang: str, do_separate: bool, do_diarize: str = "auto",
-            unison: str = "both", adlibs: str = "drop") -> None:
+            duet: str = "auto", whisper: str = "small", unison: str = "both",
+            adlibs: str = "drop", multif0: str = "auto",
+            use_lyrics_api: bool = True) -> None:
     job = JOBS[job_id]
     try:
         job.update(status="analyzing", stage="duration")
@@ -91,31 +133,36 @@ def run_job(job_id: str, audio_path: str, title: str, artist: str,
         ptrack = pitch.extract_pitch(audio, sr)
 
         job["stage"] = "lyrics"
-        words = lyrics.transcribe_words(analysis, language=lang)
+        wlang = None if lang == "auto" else lang
+        words = lyrics.transcribe_words(analysis, model_size=whisper, language=wlang)
         # deterministic recognition: replace text with canonical lyrics if found
-        canon = lyrics_api.fetch_lyrics(artist, title, duration)
-        if canon:
-            aligned = align.build_words(canon["lines"], words)
-            if aligned:
-                words = aligned
+        canonical = False
+        if use_lyrics_api:
+            canon = lyrics_api.fetch_lyrics(artist, title, duration)
+            if canon:
+                aligned = align.build_words(canon["lines"], words)
+                if aligned:
+                    words = aligned
+                    canonical = True
 
         # speaker diarization (+ per-singer pitch) for the duet split
         diar = []
         want_diar = do_diarize == "yes" or (
             do_diarize == "auto" and assemble.is_multi_artist(artist))
-        if want_diar and vocals_wav:
+        if want_diar and duet != "no" and vocals_wav:
             job["stage"] = "diarize"
             diar = diarize.diarize(vocals_wav, num_speakers=2)
         pps = {}
-        if diar and vocals_wav:
+        if diar and multif0 != "no" and vocals_wav:
             job["stage"] = "multif0"
             pps = pitch.extract_pitch_per_speaker(vocals_wav, diar)
 
         job["stage"] = "assemble"
         chart = assemble.assemble(
             words, ptrack, duration, title=title, artist=artist,
-            audio=os.path.basename(audio_path), language=lang.upper(),
-            duet="auto", diarization=diar, pitch_per_speaker=pps,
+            audio=os.path.basename(audio_path),
+            language=(wlang.upper() if wlang else None),
+            duet=duet, diarization=diar, pitch_per_speaker=pps,
             unison=unison, drop_adlibs=(adlibs == "drop"),
         )
         problems = usdx_validate.validate(chart)
@@ -138,7 +185,9 @@ def run_job(job_id: str, audio_path: str, title: str, artist: str,
         tracks = chart.tracks if chart.tracks else [chart.lines]
         job.update(status="done", stage="done", zip=zip_path,
                    notes=sum(len(l.notes) for tr in tracks for l in tr),
-                   duet=bool(chart.tracks),
+                   lines=sum(len(tr) for tr in tracks),
+                   duet=bool(chart.tracks), duration=duration,
+                   canonical=canonical,
                    words=len(words), problems=problems)
     except Exception as e:  # noqa: BLE001
         job.update(status="error", error=repr(e))
@@ -152,8 +201,11 @@ def index() -> str:
 @app.post("/upload")
 async def upload(audio: UploadFile = File(...), title: str = Form(""),
                  artist: str = Form(""), lang: str = Form("es"),
+                 mode: str = Form("auto"), whisper: str = Form("small"),
+                 unison: str = Form("both"),
                  separate: bool = Form(False), diarize: bool = Form(False),
-                 adlibs: bool = Form(False)) -> JSONResponse:
+                 adlibs: bool = Form(False), multif0: bool = Form(False),
+                 lyrics_api: bool = Form(False)) -> JSONResponse:
     job_id = uuid.uuid4().hex[:12]
     job_dir = os.path.join(WORK, job_id)
     os.makedirs(job_dir, exist_ok=True)
@@ -169,12 +221,22 @@ async def upload(audio: UploadFile = File(...), title: str = Form(""),
     title = safe_component(title or r_title, "Untitled")
     artist = safe_component(artist or r_artist, "Unknown")
 
+    # whitelist client-supplied option strings (trust boundary)
+    if whisper not in ("tiny", "base", "small", "medium", "large-v3"):
+        whisper = "small"
+    mode = mode if mode in ("auto", "yes", "no") else "auto"
+    unison = unison if unison in ("both", "lead") else "both"
+    lang = lang if re.fullmatch(r"[a-z]{2}|auto", lang or "") else "es"
+
     JOBS[job_id] = {"status": "queued", "stage": "queued"}
     threading.Thread(
         target=run_job,
         args=(job_id, audio_path, title, artist, lang, separate),
         kwargs={"do_diarize": "auto" if diarize else "no",
-                "adlibs": "drop" if adlibs else "keep"},
+                "duet": mode, "whisper": whisper, "unison": unison,
+                "adlibs": "drop" if adlibs else "keep",
+                "multif0": "auto" if multif0 else "no",
+                "use_lyrics_api": lyrics_api},
         daemon=True).start()
     return JSONResponse({"job": job_id})
 

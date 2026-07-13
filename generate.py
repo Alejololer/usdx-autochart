@@ -28,7 +28,7 @@ def main() -> int:
     ap.add_argument("audio")
     ap.add_argument("--title", default=None)
     ap.add_argument("--artist", default=None)
-    ap.add_argument("--lang", default="es")
+    ap.add_argument("--lang", default="es", help="ISO code, or 'auto' to let Whisper detect")
     ap.add_argument("--whisper", default="small")
     ap.add_argument("--no-vad", action="store_true", help="disable Whisper VAD filter")
     ap.add_argument("--separate", action="store_true", help="run Demucs first")
@@ -50,6 +50,8 @@ def main() -> int:
     ap.add_argument("--eval", default=None, help="reference .txt to score against")
     ap.add_argument("--eval-duet", default=None,
                     help="reference .txt to score per-singer (P1/P2 attribution)")
+    ap.add_argument("--eval-json", default=None,
+                    help="also dump --eval/--eval-duet metrics as JSON here")
     ap.add_argument("--dump-txt", default=None, help="also write the .txt here")
     args = ap.parse_args()
 
@@ -99,9 +101,10 @@ def main() -> int:
     voiced = int((pitch_track[2] > 0.5).sum())
     log(f"pitch frames voiced: {voiced}/{len(pitch_track[0])}")
 
-    log(f"transcribing lyrics (faster-whisper {args.whisper})...")
+    lang = None if args.lang == "auto" else args.lang
+    log(f"transcribing lyrics (faster-whisper {args.whisper}, lang={lang or 'auto'})...")
     words = lyrics.transcribe_words(analysis_path, model_size=args.whisper,
-                                    language=args.lang, vad=not args.no_vad, device=dev)
+                                    language=lang, vad=not args.no_vad, device=dev)
     log(f"whisper words: {len(words)}")
 
     # Deterministic recognition: replace Whisper's guessed text with canonical
@@ -153,7 +156,7 @@ def main() -> int:
     chart = assemble.assemble(
         words, pitch_track, duration,
         title=title, artist=artist, audio=os.path.basename(audio_path),
-        target_grid_s=args.grid, language=args.lang.upper(), duet=args.duet,
+        target_grid_s=args.grid, language=(lang.upper() if lang else None), duet=args.duet,
         diarization=diar, pitch_per_speaker=pps, unison=args.unison,
         drop_adlibs=(args.adlibs == "drop"),
     )
@@ -189,10 +192,12 @@ def main() -> int:
     if args.dump_txt:
         usdx_writer.write(chart, args.dump_txt)
 
+    results = {}
     if args.eval:
         ref = usdx_parse.read_file(args.eval)
         metrics = evaluate.evaluate(chart, ref)
         print(evaluate.format_report(metrics))
+        results.update(metrics)
 
     if args.eval_duet:
         ref = usdx_parse.read_file(args.eval_duet, keep_tracks=True)
@@ -202,6 +207,15 @@ def main() -> int:
         else:
             log("--eval-duet needs a 2-track P1/P2 chart on both sides; "
                 "use --eval for the flattened score")
+        results["duet"] = dm
+
+    if args.eval_json and results:
+        import json
+        results["gen_is_duet"] = bool(chart.tracks)
+        results["problems"] = problems
+        with open(args.eval_json, "w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False, indent=1, default=float)
+        log(f"metrics json: {args.eval_json}")
 
     return 0
 

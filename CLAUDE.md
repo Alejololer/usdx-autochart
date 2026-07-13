@@ -24,12 +24,25 @@ pip install demucs                      # optional vocal separation (pulls torch
 python generate.py "Artist - Title.mp3" --lang es --whisper small --outdir songs \
     --eval "reference.txt"             # --eval scores output vs a gold chart
 
-# Web upload service (same pipeline, one job per upload, returns a zip)
+# Web upload service (same pipeline, one job per upload, returns a zip).
+# The form exposes the pipeline knobs (mode solo/duet/auto, language incl.
+# auto-detect, Whisper size, separate/diarize/adlibs, unison, multif0,
+# lyrics-API) and polls /status for a result summary before download.
 uvicorn app.main:app                    # http://127.0.0.1:8000
+
+# Batch accuracy eval against an existing karaoke library
+# (folders of "Artist - Title.mp3" + gold .txt; language read from #LANGUAGE).
+# Resumable: results keyed by seed+n under eval_runs/; --aggregate-only rebuilds
+# the CSV/summary. Uses generate.py --eval-json per song (subprocess isolation).
+python batch_eval.py --lib "D:/Canciones Karaoke" --n 30 --seed 0
 
 # Tests — core format/timing math, no ML deps needed
 python -m tests.test_core               # run from usdx-autochart/
 ```
+
+`generate.py --lang auto` lets Whisper auto-detect the language;
+`--eval-json PATH` dumps the `--eval`/`--eval-duet` metrics as JSON
+(the duet metrics under key `"duet"`, plus `gen_is_duet` and `problems`).
 
 There is no pytest harness; `tests/test_core.py` is a plain script with `assert`s
 and `print`s, run as a module. Run individual checks by calling their `test_*`
@@ -169,6 +182,13 @@ python generate.py "benchmarks/Alejandro Sanz - Corazón partío/Alejandro Sanz 
     --eval "benchmarks/Alejandro Sanz - Corazón partío/Alejandro Sanz - Corazón partío.txt"
 ```
 When changing the pipeline, run both and check the metrics don't regress.
+
+### Library-wide baseline (batch_eval.py)
+`python batch_eval.py` (30 random songs from `D:\Canciones Karaoke`, seed 0,
+2026-07-13): 30/30 generated, zero validation problems / crashes / false duet
+splits; medians match 0.60, onset ~131 ms, pitch corr 0.50, lyric sim 0.20.
+Full analysis, root causes, and follow-ups: `FINDINGS-2026-07-13.md`.
+Rerun with the same seed/n before and after pipeline changes to compare.
 
 ## Conventions / gotchas
 

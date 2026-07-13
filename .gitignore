@@ -6,6 +6,11 @@ __pycache__/
 # Generated song output (songs/, plus eval scratch dirs like songs_clust/)
 songs/
 songs_*/
+eval_runs/
+
+# Local tooling scratch
+.playwright-mcp/
+.serena/
 
 # Intermediate audio (separated stems, temp)
 *.wav
