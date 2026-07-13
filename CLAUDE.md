@@ -150,6 +150,12 @@ a list of problem strings; empty == USDX should load it. **Mirror any new USDX l
 rule here** when you find one in upstream `src/base/USong.pas`.
 
 ### Evaluation (evaluate.py)
+**Interpretation caveat:** gold charts are hand-made and stylistic — match/onset/
+pitch metrics measure agreement with one charter's choices, not accuracy against
+the audio (lyrics are the only real ground truth). Use them for regression
+detection on pipeline changes, not absolute quality ranking; small deltas are
+noise.
+
 `--eval` scores the generated chart against a gold reference **entirely in the time
 domain** (seconds), so differing BPM/GAP choices don't bias results. Reports note-count
 ratio, onset error (ms), relative-pitch contour correlation (medians subtracted), and
