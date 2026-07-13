@@ -166,7 +166,8 @@ def run_job(job_id: str, audio_path: str, title: str, artist: str,
         # speaker diarization (+ per-singer pitch) for the duet split
         diar = []
         want_diar = do_diarize == "yes" or (
-            do_diarize == "auto" and assemble.is_multi_artist(artist))
+            do_diarize == "auto" and (duet == "yes"
+                                      or assemble.is_multi_artist(artist)))
         if want_diar and duet != "no" and vocals_wav:
             job["stage"] = "diarize"
             diar = diarize.diarize(vocals_wav, num_speakers=2)

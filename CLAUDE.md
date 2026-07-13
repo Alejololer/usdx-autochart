@@ -132,7 +132,7 @@ The **label source** is, in order of preference:
    segment list is passed — each word is attributed to the most-overlapping speaker,
    sentences take the majority, and tracks are ordered **lead-first by earliest onset**
    (P1 = first to sing). Requires `--separate` (it diarizes the vocal stem) + `HF_TOKEN`.
-   Flag `--diarize auto|yes|no` (auto = on for multi-artist).
+   Flag `--diarize auto|yes|no` (auto = on for multi-artist or forced `--duet yes`).
 2. **Register clustering** (`_kmeans2` on per-sentence median pitch) — the deterministic
    fallback used when diarization is unavailable or its split is too lopsided.
 
@@ -200,8 +200,10 @@ Full analysis, root causes, and follow-ups: `FINDINGS-2026-07-13.md`.
 Rerun with the same seed/n before and after pipeline changes to compare.
 Duet A/B on 12 library `[MULTI]` duets (same day, `--duets-only`): diarization
 split 4/6 multi-artist-named duets (saa median 0.627) vs clustering's 2 —
-coverage, not accuracy, is diarization's win; 6/12 duets have single-name
-artists so `is_multi_artist` never tries (open gap).
+coverage, not accuracy, is diarization's win. 6/12 duets have single-name
+artists so auto mode never tries — by design: the user forces those via the
+web UI mode selector / `--duet yes`, which also engages diarization under
+`--diarize auto`.
 
 ## Conventions / gotchas
 

@@ -35,7 +35,8 @@ def main() -> int:
     ap.add_argument("--device", default="auto", help="auto|cuda|cpu")
     ap.add_argument("--duet", default="auto", help="auto|yes|no (P1/P2 split)")
     ap.add_argument("--diarize", default="auto",
-                    help="auto|yes|no - speaker diarization for the duet split "
+                    help="auto|yes|no - speaker diarization for the duet split; "
+                         "auto = on for multi-artist names or forced --duet yes "
                          "(needs --separate + HF_TOKEN; falls back to clustering)")
     ap.add_argument("--multif0", default="auto",
                     help="auto|no - per-singer pitch via basic-pitch during overlap")
@@ -149,7 +150,8 @@ def main() -> int:
     # speaker diarization for the duet split (needs the separated vocal stem).
     diar = []
     want_diar = args.diarize == "yes" or (
-        args.diarize == "auto" and assemble.is_multi_artist(artist))
+        args.diarize == "auto" and (args.duet == "yes"
+                                    or assemble.is_multi_artist(artist)))
     if want_diar and args.duet != "no":
         if vocals_wav:
             log("diarizing singers (pyannote)...")
