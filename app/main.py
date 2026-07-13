@@ -75,8 +75,8 @@ PAGE = """
     <label><input type=checkbox name=diarize checked> diarize singers</label>
     <label><input type=checkbox name=adlibs checked> drop ad-libs</label><br><br>
     Whisper model <select name=whisper>
-      <option>tiny</option><option>base</option><option selected>small</option>
-      <option>medium</option><option>large-v3-turbo</option><option>large-v3</option>
+      <option>tiny</option><option>base</option><option>small</option>
+      <option>medium</option><option selected>large-v3-turbo</option><option>large-v3</option>
     </select>
     <details style="display:inline-block;margin-left:1em"><summary>advanced</summary>
       Unison lines <select name=unison>

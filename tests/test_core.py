@@ -161,6 +161,100 @@ def test_assemble_drops_adlibs():
     print("OK assemble drops adlibs")
 
 
+def test_style_guards():
+    # 100 fps synthetic pitch track: voice sounds only over the true note spans.
+    t = np.linspace(0, 30.0, 3000)
+    f0 = np.zeros_like(t)
+    conf = np.zeros_like(t)
+
+    def voice(a, b, hz):
+        m = (t >= a) & (t < b)
+        f0[m] = hz
+        conf[m] = 0.9
+
+    voice(3.0, 3.4, 220.0)    # "Voy" truly sung at 3.0s ...
+    voice(3.5, 3.9, 220.0)    # "con"
+    voice(9.0, 9.4, 220.0)    # "Hoy" (next line)
+    voice(9.5, 12.0, 220.0)   # "nooo" held 2.5 s: 220 Hz ...
+    f0[(t >= 10.5) & (t < 12.0)] = 246.94  # ... then +2 st (B3) held
+    words = [
+        {"text": "Voy", "start": 0.1, "end": 3.4, "line_index": 0},  # whisper starts 2.9 s early
+        {"text": "con", "start": 3.5, "end": 3.9, "line_index": 0},
+        {"text": "Hoy", "start": 9.0, "end": 9.4, "line_index": 1},
+        {"text": "no", "start": 9.5, "end": 12.0, "line_index": 1},
+    ]
+    chart = assemble(words, (t, f0, conf), 30.0, "T", "A", "a.mp3")
+    # snap-to-voiced: GAP follows the real 3.0 s onset, not whisper's 0.1 s
+    assert chart.gap_ms > 2500, chart.gap_ms
+    # held note split into base + '~' continuation at the +2 st change
+    texts = [n.text for l in chart.lines for n in l.notes]
+    assert "~" in texts, texts
+    flat = [n for l in chart.lines for n in l.notes]
+    base = next(n for n in flat if n.text.lstrip() == "no")
+    holds = [n for n in flat if n.text == "~"]
+    assert any(abs(h.pitch - base.pitch) == 2 for h in holds), (base.pitch, [h.pitch for h in holds])
+    # minimum duration: nothing shorter than 2 beats unless crammed
+    assert all(n.duration >= 1 for n in flat)
+
+    # early first word: two same-line followers agree on a much later time, so
+    # the word is re-anchored to abut them (count-in mistimestamp repair)
+    voice(1.0, 1.4, 220.0)     # spoken count-in (voiced, fools snapping)
+    voice(20.0, 22.0, 220.0)   # the real line
+    words2 = [
+        {"text": "Sa", "start": 1.0, "end": 1.4, "line_index": 0},
+        {"text": "bes", "start": 20.5, "end": 20.9, "line_index": 0},
+        {"text": "bien", "start": 21.0, "end": 21.5, "line_index": 0},
+    ]
+    c2 = assemble(words2, (t, f0, conf), 30.0, "T", "A", "a.mp3")
+    assert len(c2.lines) == 1, [len(l.notes) for l in c2.lines]
+    assert c2.gap_ms > 18000, c2.gap_ms  # GAP follows the repaired first word
+
+    # gap guard: same line_index but a big hole (no majority) breaks the line
+    words3 = [
+        {"text": "En", "start": 1.0, "end": 1.4, "line_index": 0},
+        {"text": "el", "start": 21.0, "end": 21.4, "line_index": 0},
+    ]
+    c3 = assemble(words3, (t, f0, conf), 30.0, "T", "A", "a.mp3")
+    assert len(c3.lines) == 2, [len(l.notes) for l in c3.lines]
+    print("OK style guards (snap-to-voiced GAP, ~ holds, repair, gap guard)")
+
+
+def test_align_drops_hallucination_runs():
+    ww = ([{"text": "intro", "start": 0.0, "end": 0.2}]
+          + [{"text": w, "start": 1 + i, "end": 1.4 + i}
+             for i, w in enumerate(["hola", "mundo", "feliz"])]
+          + [{"text": f"blah{i}", "start": 10 + i, "end": 10.4 + i} for i in range(6)]
+          + [{"text": "adios", "start": 20.0, "end": 20.4}]
+          + [{"text": f"credit{i}", "start": 30 + i, "end": 30.4 + i} for i in range(6)])
+    out = build_words(["hola mundo feliz", "adios"], ww)
+    texts = [w["text"] for w in out]
+    # out-of-vocab runs of 6 (mid + trailing) dropped; leading intro dropped
+    assert texts == ["hola", "mundo", "feliz", "adios"], texts
+    # short unmatched runs (<=4) between matches survive
+    ww2 = [{"text": w, "start": float(i), "end": i + 0.4}
+           for i, w in enumerate(["hola", "extra", "mundo"])]
+    out2 = build_words(["hola mundo"], ww2)
+    assert [w["text"] for w in out2] == ["hola", "extra", "mundo"]
+    # a long unmatched run of *in-vocabulary* words is a repeated chorus: kept
+    chorus = ["hola", "mundo", "feliz", "hola", "mundo", "feliz"]
+    ww3 = ([{"text": w, "start": 1 + i, "end": 1.4 + i}
+            for i, w in enumerate(["hola", "mundo", "feliz"])]
+           + [{"text": w, "start": 10 + i, "end": 10.4 + i}
+              for i, w in enumerate(chorus)])
+    out3 = build_words(["hola mundo feliz"], ww3)
+    assert len(out3) == 9, [w["text"] for w in out3]
+    # a spoken count-in must not be force-matched to the first lyric words
+    ww4 = ([{"text": w, "start": 0.5 * i, "end": 0.5 * i + 0.3}
+            for i, w in enumerate(["dos", "tres"])]
+           + [{"text": w, "start": 14 + i, "end": 14.4 + i}
+              for i, w in enumerate(["sabes", "tu", "muy", "bien"])])
+    out4 = build_words(["sabes tu muy bien"], ww4)
+    assert [w["text"] for w in out4] == ["sabes", "tu", "muy", "bien"], \
+        [(w["text"], w["start"]) for w in out4]
+    assert out4[0]["start"] >= 14.0  # timing comes from the real "sabes"
+    print("OK align drops hallucination runs")
+
+
 def test_diarization_split_and_unison():
     # 12 one-word lines; flat pitch so register clustering would NOT split.
     words = [{"text": "la", "start": i * 1.0, "end": i * 1.0 + 0.8,
@@ -199,5 +293,7 @@ if __name__ == "__main__":
     test_adlib_tokenize()
     test_adlib_build_words()
     test_assemble_drops_adlibs()
+    test_style_guards()
+    test_align_drops_hallucination_runs()
     test_diarization_split_and_unison()
     print("\nALL CORE TESTS PASSED")

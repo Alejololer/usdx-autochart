@@ -177,10 +177,12 @@ generation quality — they exercise both code paths and `tests/test_core.py` pa
 them. The full source folders (gold `.txt`, input `.mp3`, `.avi` video, covers) are
 committed via **Git LFS** so the benchmarks are runnable end-to-end:
 - `benchmarks/Alejandro Sanz - Corazón partío/` — **solo** benchmark. Should stay solo
-  (single performer). Reference replication: note-ratio ~1.10, match ~0.74, onset
-  ~104 ms, pitch corr ~0.56, lyric sim ~0.46.
+  (single performer). Reference replication (after the 2026-07-13 style overhaul:
+  snap-to-voiced, gap guard, ~ holds): note-ratio ~1.12, match ~0.82–0.91, onset
+  ~55–63 ms, pitch corr ~0.85–0.91, lyric sim ~0.48–0.56 (faster-whisper GPU runs
+  are not bit-identical; expect that much run-to-run spread).
 - `benchmarks/Carlos Baute y Marta Sánchez - Colgando en tus manos/` — **duet** benchmark.
-  Should split into P1/P2. Reference replication: note-ratio ~1.05, match ~0.77;
+  Should split into P1/P2. Reference replication (same date): note-ratio ~1.04, match ~0.88;
   flattened pitch corr only ~0.25 — inherent, since both singers share one separated
   stem. The folder also ships a `[MULTI].txt` (P1 Carlos / P2 Marta) — use it with
   `--eval-duet` to score per-singer attribution. Measured `singer_assignment_accuracy`:
@@ -199,11 +201,19 @@ python generate.py "benchmarks/Alejandro Sanz - Corazón partío/Alejandro Sanz 
 When changing the pipeline, run both and check the metrics don't regress.
 
 ### Library-wide baseline (batch_eval.py)
-`python batch_eval.py` (30 random songs from `D:\Canciones Karaoke`, seed 0,
-2026-07-13): 30/30 generated, zero validation problems / crashes / false duet
-splits; medians match 0.60, onset ~131 ms, pitch corr 0.50, lyric sim 0.20.
-Full analysis, root causes, and follow-ups: `FINDINGS-2026-07-13.md`.
+`python batch_eval.py` (30 random songs from `D:\Canciones Karaoke`, seed 0).
+Current baseline (2026-07-13, post style-overhaul, run dir `eval_runs/n30-seed0`):
+30/30 generated, zero crashes; medians match **0.66**, onset **~92 ms**, pitch
+contour corr **0.82**, pitch-within-2st **0.86**, lyric sim **0.68** (rescored
+with the `autojunk=False` fix; the CSV's stored lyric numbers predate it).
+Pre-overhaul run kept at `eval_runs/n30-seed0-baseline-20260713` (medians match
+0.60, onset ~131 ms, pitch corr 0.50, lyric sim 0.59 rescored) — original
+analysis in `FINDINGS-2026-07-13.md`.
 Rerun with the same seed/n before and after pipeline changes to compare.
+**`lyric_similarity` gotcha:** difflib's `autojunk` heuristic makes ratios on
+>200-char strings near-random; every `SequenceMatcher` on lyrics must pass
+`autojunk=False` (fixed in evaluate.py 2026-07-13 — old stored JSON/CSV lyric
+numbers are garbage for long songs).
 Duet A/B on 12 library `[MULTI]` duets (same day, `--duets-only`): diarization
 split 4/6 multi-artist-named duets (saa median 0.627) vs clustering's 2 —
 coverage, not accuracy, is diarization's win. 6/12 duets have single-name

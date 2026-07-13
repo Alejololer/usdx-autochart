@@ -2,8 +2,11 @@
 
 Result: the canonical words, in order, each with a start/end time taken from
 the matching Whisper word (audio-accurate) or interpolated when Whisper missed
-it. Whisper words with no canonical match (spoken intros, hallucinations on the
-separated stem) are dropped. Canonical line breaks become USDX sentence breaks.
+it. Whisper words with no canonical match are dropped when they form the
+leading run (spoken intro) or a long run outside the song's vocabulary
+(subtitle-credit hallucinations, invented outros); unmatched words that look
+like lyrics — short runs, repeated choruses — are kept. Canonical line breaks
+become USDX sentence breaks.
 
 This makes the *text* deterministic (it's the looked-up lyric, not a guess)
 while keeping *timing* from the audio.
@@ -18,6 +21,11 @@ import difflib
 import re
 import unicodedata
 from typing import List, Optional
+
+
+# longest run of consecutive unmatched Whisper words kept as sung extras;
+# longer runs are dropped as hallucinations (credits, invented outros)
+_MAX_UNMATCHED_RUN = 4
 
 
 def _key(word: str) -> str:
@@ -75,12 +83,16 @@ def tokenize_lines(lines: List[str]) -> List[dict]:
 
 
 def build_words(lyric_lines: List[str], whisper_words: List[dict]) -> Optional[List[dict]]:
-    """Whisper-driven alignment: keep every Whisper word (its audio timing is
-    what we trust), but where it lines up with the canonical lyric, replace the
-    text with the canonical word and adopt the canonical line break. Drop only
-    the leading words before the first canonical match (spoken/hallucinated
-    intro). Returns word dicts with text/start/end/line_index, or None if the
-    overlap is too poor to trust.
+    """Whisper-driven alignment: keep the Whisper words (their audio timing is
+    what we trust), but where they line up with the canonical lyric, replace the
+    text with the canonical word and adopt the canonical line break. Unmatched
+    Whisper words are dropped when they lie before the first match, or form a
+    run of > _MAX_UNMATCHED_RUN consecutive words mostly *outside* the song's
+    vocabulary — hallucinations ("Subtítulos realizados por...", invented
+    outros). Long in-vocabulary runs are repeated choruses (canonical text
+    lists them once; difflib matches monotonically) and are kept, as are short
+    unmatched runs (real sung words the lyric DB missed). Returns word dicts
+    with text/start/end/line_index, or None if the overlap is too poor to trust.
     """
     canonical = tokenize_lines(lyric_lines)
     if not canonical or not whisper_words:
@@ -92,18 +104,49 @@ def build_words(lyric_lines: List[str], whisper_words: List[dict]) -> Optional[L
 
     match: dict = {}  # whisper index -> canonical token
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
-        if tag in ("equal", "replace"):
-            n = min(i2 - i1, j2 - j1)
-            for k in range(n):
-                match[j1 + k] = canonical[i1 + k]
+        if tag not in ("equal", "replace"):
+            continue
+        n = min(i2 - i1, j2 - j1)
+        for k in range(n):
+            # a "replace" pairs whatever falls between anchors; only trust it
+            # when the words actually resemble each other, else a spoken
+            # count-in gets labeled as the first lyric line at the wrong time
+            if tag == "replace" and difflib.SequenceMatcher(
+                    a=canonical[i1 + k]["key"], b=b[j1 + k]).ratio() < 0.5:
+                continue
+            match[j1 + k] = canonical[i1 + k]
 
     if len(match) < 0.3 * len(canonical):
         return None  # too little overlap to trust the lookup
 
-    j_first = min(match)
+    # emit matched words plus unmatched runs that look like real lyrics. Long
+    # runs of words outside the song's vocabulary are hallucinations (subtitle
+    # credits, invented outros); long runs *inside* it are repeated choruses the
+    # canonical text lists once (difflib matches monotonically) - keep those.
+    vocab = {t["key"] for t in canonical}
+
+    def _run_is_lyrics(run: List[int]) -> bool:
+        if len(run) <= _MAX_UNMATCHED_RUN:
+            return True
+        inv = sum(1 for j in run if _key(whisper_words[j]["text"]) in vocab)
+        return inv >= 0.5 * len(run)
+
+    keep: List[int] = []
+    run: List[int] = []
+    for j in range(min(match), len(whisper_words)):
+        if j in match:
+            if _run_is_lyrics(run):
+                keep.extend(run)
+            run = []
+            keep.append(j)
+        else:
+            run.append(j)
+    if run and _run_is_lyrics(run):  # trailing run: same vocabulary test
+        keep.extend(run)
+
     out: List[dict] = []
     prev_line: Optional[int] = None
-    for j in range(j_first, len(whisper_words)):
+    for j in keep:
         w = whisper_words[j]
         tok = match.get(j)
         if tok is not None:

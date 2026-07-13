@@ -88,8 +88,10 @@ def evaluate(generated: Chart, reference: Chart, onset_tol: float = 0.3) -> dict
     else:
         pitch_corr, pitch_within2 = 0.0, 0.0
 
+    # autojunk=False: difflib's popularity heuristic treats common characters
+    # in >200-char strings as junk, making ratios on full lyrics near-random
     lyric_ratio = difflib.SequenceMatcher(
-        None, _norm_text(gen), _norm_text(ref)
+        None, _norm_text(gen), _norm_text(ref), autojunk=False
     ).ratio()
 
     return {
@@ -130,7 +132,8 @@ def _pair_metrics(gen: List[TimedNote], ref: List[TimedNote],
         pitch_within2 = float(np.mean(np.abs(gp - rp) <= 2))
     else:
         pitch_corr, pitch_within2 = 0.0, 0.0
-    lyric = difflib.SequenceMatcher(None, _norm_text(gen), _norm_text(ref)).ratio()
+    lyric = difflib.SequenceMatcher(None, _norm_text(gen), _norm_text(ref),
+                                    autojunk=False).ratio()
     return {
         "gen_notes": len(gen),
         "ref_notes": len(ref),
