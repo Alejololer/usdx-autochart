@@ -81,6 +81,7 @@ audio ─▶ separate.py   (optional Demucs vocal stem)
       ─▶ pitch.py       CREPE/GPU or pYIN/CPU  → (times, f0_hz, confidence)
       ─▶ lyrics.py      faster-whisper          → word-level [{text,start,end}]
       ─▶ lyrics_api.py + align.py  (canonical lyrics overlay, see below)
+      ─▶ forced_align.py  MMS_FA CTC re-times canonical words (primary clock, gated)
       ─▶ assemble.py    syllabify + beat-quantize → Chart (in-memory)
       ─▶ usdx_validate.py  load-guard (mirrors USong.pas)
       ─▶ usdx_writer.py    Chart → song.txt + copied audio
@@ -109,6 +110,37 @@ adopts canonical **line breaks as USDX sentence breaks** (`line_index`). It drop
 pre-lyric intro (fixes GAP drift from intro hallucination) and bails (returns `None`,
 keeping raw Whisper) if overlap is under 30%. Whisper runs `temperature=0` for
 reproducibility. Skip with `--no-lyrics-api`.
+
+### Lyrics-first timing (forced_align.py, 2026-07-13)
+When canonical lyrics matched the audio (the `build_words` 30%-overlap check above
+doubles as the text-matches-audio pre-check), `forced_align.align_words` re-times
+**every canonical word** with torchaudio's bundled `MMS_FA` (multilingual wav2vec2
+CTC, ~20 ms frames, ~1.2 GB checkpoint auto-downloaded on first use): emissions in
+30 s chunks, one Viterbi pass, tokens NFD-normalized to a–z (skips when <80%
+romanize — ja/kana keeps the Whisper path). Word dicts gain `char_spans`
+(per-character acoustic spans) + `score`; `assemble._char_span_cuts` cuts syllables
+at those boundaries instead of proportional spread, and the count-in re-anchor is
+skipped for FA-timed words (their onsets are measured). This fixes Whisper-recall
+word loss (canonical text is the unit of output) and elongated-vowel overlap.
+**Sanity gate** (`passes_gate`): mean word score ≥0.15 **and** ≥85% of aligned words
+overlap voiced f0 frames; on failure the chart keeps the Whisper-merge timing
+(`--forced-align no` forces that). Thresholds calibrated on the Phase-0 run —
+CTC scores on singing are systematically low even when timing is right (misplaced
+alignments show as words in unvoiced regions, hence the voiced-coverage test).
+`lyric_source` becomes `lrclib+fa`/`pasted+fa` when adopted. Deterministic (fixed
+CNN, no sampling).
+
+**Stage-level eval (`library_replay.py`):** scores Whisper timing, FA timing,
+syllable-cut rules, CREPE-pitch-on-gold-boundaries, and `tempo.estimate_bpm`
+independently against gold charts (stratified es/en/other × wpm-tercile sample;
+resumable per-song caching like batch_eval under `eval_runs/replay-*`). Phase-0
+run (`replay-n100-seed0`, 100 songs): FA word recall **1.00** vs Whisper **0.63**;
+FA onset median **53 ms** vs Whisper **165 ms**; FA char-span syllable cuts
+**44 ms** vs proportional spread **88 ms**; FA beat Whisper on 87/100 songs, but
+12/100 were catastrophic (drifted alignment, seconds off) — that tail is what the
+gate catches. CREPE pitch on gold boundaries: within-2st 0.93, corr 0.93 (pitch
+was never the problem). `tempo.estimate_bpm` within 2% of gold `#BPM` (mod octave)
+on only **42/100** — musical-grid quantization (old Phase 2) stays shelved.
 
 **Ad-lib avoider:** lyric DBs bracket backing-vocal ad-libs as `(...)`. `_adlib_flags`
 detects those spans during `tokenize_lines` (before `_clean_display` strips the parens),
@@ -177,14 +209,16 @@ generation quality — they exercise both code paths and `tests/test_core.py` pa
 them. The full source folders (gold `.txt`, input `.mp3`, `.avi` video, covers) are
 committed via **Git LFS** so the benchmarks are runnable end-to-end:
 - `benchmarks/Alejandro Sanz - Corazón partío/` — **solo** benchmark. Should stay solo
-  (single performer). Reference replication (after the 2026-07-13 style overhaul:
-  snap-to-voiced, gap guard, ~ holds): note-ratio ~1.12, match ~0.82–0.91, onset
-  ~55–63 ms, pitch corr ~0.85–0.91, lyric sim ~0.48–0.56 (faster-whisper GPU runs
-  are not bit-identical; expect that much run-to-run spread).
+  (single performer). Reference replication (2026-07-13, forced-alignment path,
+  `lyric_source=lrclib+fa`): note-ratio ~0.86, match ~0.73, onset ~72 ms, pitch corr
+  ~0.87, lyric sim ~0.79. (The gold chart carves this song into more/finer notes than
+  FA's word-driven cuts — note-ratio dropped from ~1.12 pre-FA while lyric sim jumped
+  from ~0.5; judge changes against the whole metric set, not match alone.
+  faster-whisper GPU runs are not bit-identical; expect run-to-run spread.)
 - `benchmarks/Carlos Baute y Marta Sánchez - Colgando en tus manos/` — **duet** benchmark.
-  Should split into P1/P2. Reference replication (same date): note-ratio ~1.04, match ~0.88;
-  flattened pitch corr only ~0.25 — inherent, since both singers share one separated
-  stem. The folder also ships a `[MULTI].txt` (P1 Carlos / P2 Marta) — use it with
+  Should split into P1/P2. Reference replication (same date, FA path): note-ratio ~1.05,
+  match ~0.91, onset ~40 ms, lyric sim ~0.94; flattened pitch corr only ~0.4 — inherent,
+  since both singers share one separated stem. The folder also ships a `[MULTI].txt` (P1 Carlos / P2 Marta) — use it with
   `--eval-duet` to score per-singer attribution. Measured `singer_assignment_accuracy`:
   **diarization 0.586 vs register-clustering 0.512** (diarization wins, but neither
   hits the 0.80 stretch target — separating two singers from one mixed vocal stem is
@@ -202,13 +236,14 @@ When changing the pipeline, run both and check the metrics don't regress.
 
 ### Library-wide baseline (batch_eval.py)
 `python batch_eval.py` (30 random songs from `D:\Canciones Karaoke`, seed 0).
-Current baseline (2026-07-13, post style-overhaul, run dir `eval_runs/n30-seed0`):
-30/30 generated, zero crashes; medians match **0.66**, onset **~92 ms**, pitch
-contour corr **0.82**, pitch-within-2st **0.86**, lyric sim **0.68** (rescored
-with the `autojunk=False` fix; the CSV's stored lyric numbers predate it).
-Pre-overhaul run kept at `eval_runs/n30-seed0-baseline-20260713` (medians match
-0.60, onset ~131 ms, pitch corr 0.50, lyric sim 0.59 rescored) — original
-analysis in `FINDINGS-2026-07-13.md`.
+Current baseline (2026-07-13, post forced-alignment, run dir `eval_runs/n30-seed0`):
+30/30 generated, zero crashes; medians match **0.796**, onset **~67 ms**, pitch
+contour corr **0.83**, pitch-within-2st **0.88**, lyric sim **0.80**.
+Prior runs kept for comparison: post-style-overhaul/pre-FA at
+`eval_runs/n30-seed0-preFA-20260713` (match 0.66, onset ~92 ms, lyric 0.68) and
+pre-overhaul at `eval_runs/n30-seed0-baseline-20260713` (match 0.60, onset
+~131 ms, pitch corr 0.50, lyric sim 0.59 rescored) — original analysis in
+`FINDINGS-2026-07-13.md`, FA strategy in `STRATEGY-2026-07-13.md`.
 Rerun with the same seed/n before and after pipeline changes to compare.
 **`lyric_similarity` gotcha:** difflib's `autojunk` heuristic makes ratios on
 >200-char strings near-random; every `SequenceMatcher` on lyrics must pass

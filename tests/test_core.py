@@ -283,6 +283,32 @@ def test_diarization_split_and_unison():
     print("OK diarization split + unison policy")
 
 
+def test_gold_words_and_norm():
+    # library_replay.gold_words: notes -> time-domain words (spacing = word
+    # boundary, '~' = hold extending the previous syllable)
+    import library_replay as lr
+    from pipeline.forced_align import norm_word
+
+    c = Chart("t", "a", bpm=240.0, gap_ms=1000, audio="x.mp3", lines=[
+        Line(notes=[Note(0, 2, 5, "Co"), Note(2, 2, 5, "ra"),
+                    Note(4, 2, 7, "zón "), Note(8, 2, 7, "par"),
+                    Note(10, 2, 5, "tío"), Note(12, 4, 5, "~")]),
+        Line(break_beat=20, notes=[Note(24, 2, 5, "ya")]),
+    ])
+    words = lr.gold_words(c)
+    assert [w["text"] for w in words] == ["Corazón", "partío", "ya"]
+    assert len(words[0]["sylls"]) == 3 and len(words[1]["sylls"]) == 2
+    assert abs(words[0]["start"] - 1.0) < 1e-9          # GAP + beat 0
+    assert abs(words[1]["end"] - c.beat_to_time(16)) < 1e-9  # '~' extends
+    assert words[2]["line_index"] == 1
+
+    assert norm_word("Corazón") == "corazon"
+    assert norm_word("¿Qué?") == "que"
+    assert norm_word("123") == ""       # unromanizable -> interpolated later
+    assert norm_word("ñoño") == "nono"
+    print("OK gold_words + forced_align.norm_word")
+
+
 if __name__ == "__main__":
     test_timing_matches_usdx()
     test_roundtrip()
@@ -296,4 +322,5 @@ if __name__ == "__main__":
     test_style_guards()
     test_align_drops_hallucination_runs()
     test_diarization_split_and_unison()
+    test_gold_words_and_norm()
     print("\nALL CORE TESTS PASSED")

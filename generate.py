@@ -14,8 +14,9 @@ import os
 import shutil
 import sys
 
-from pipeline import (audio_io, align, assemble, diarize, evaluate, lyrics,
-                      lyrics_api, metadata, pitch, separate, tempo)
+from pipeline import (audio_io, align, assemble, diarize, evaluate,
+                      forced_align, lyrics, lyrics_api, metadata, pitch,
+                      separate, tempo)
 from pipeline import usdx_parse, usdx_validate, usdx_writer
 
 
@@ -46,6 +47,10 @@ def main() -> int:
                     help="drop ()-bracketed backing-vocal ad-libs from canonical lyrics")
     ap.add_argument("--no-lyrics-api", action="store_true",
                     help="skip LRCLIB canonical lyrics lookup")
+    ap.add_argument("--forced-align", default="auto", choices=["auto", "no"],
+                    help="CTC forced alignment (MMS_FA) as the primary word "
+                         "clock when canonical lyrics match the audio; "
+                         "'no' keeps the Whisper-merge timing")
     ap.add_argument("--lyrics-file", default=None,
                     help="UTF-8 text file of canonical lyrics (one line per "
                          "sung line); takes precedence over LRCLIB")
@@ -116,6 +121,7 @@ def main() -> int:
     # file takes precedence over the LRCLIB lookup.
     warnings = []
     lyric_source = "whisper"
+    canonical_lines = None
     if args.lyrics_file:
         with open(args.lyrics_file, encoding="utf-8-sig") as f:
             lines = [l.strip() for l in f.read().splitlines() if l.strip()]
@@ -125,6 +131,7 @@ def main() -> int:
                 f"({len(lines)} lines)")
             words = aligned
             lyric_source = "pasted"
+            canonical_lines = lines
         else:
             log("lyrics file alignment too weak; ignoring it")
             warnings.append("lyrics file did not align with the audio; ignored")
@@ -138,10 +145,27 @@ def main() -> int:
                     f"({len(canon['lines'])} lines)")
                 words = aligned
                 lyric_source = "lrclib"
+                canonical_lines = canon["lines"]
             else:
                 log("alignment too weak; keeping Whisper transcription")
         else:
             log("no canonical lyrics found; keeping Whisper transcription")
+
+    # Lyrics-first timing: when canonical lyrics matched the audio (the
+    # build_words overlap check above is the text-matches-audio pre-check),
+    # re-time every canonical word with CTC forced alignment - measured
+    # onsets/extents, so Whisper's recall no longer limits the chart, and
+    # char_spans let assemble cut syllables at acoustic boundaries. Gated by
+    # a voiced-coverage/score sanity check; on failure keep the Whisper merge.
+    if canonical_lines is not None and args.forced_align != "no":
+        log("forced alignment (MMS_FA)...")
+        fa = forced_align.align_words(canonical_lines, analysis_path, device=dev)
+        if fa and forced_align.passes_gate(fa, pitch_track):
+            words = fa["words"]
+            lyric_source += "+fa"
+            log(f"FA timing adopted: {len(words)} words, score {fa['score']:.2f}")
+        else:
+            log("FA unavailable or failed the sanity gate; keeping Whisper timing")
     warn = lyrics.low_words_warning(len(words), duration)
     if warn:
         log(f"WARNING: {warn}")

@@ -107,6 +107,39 @@ def _median_pitch(times, f0, conf, t0: float, t1: float) -> Tuple[Optional[float
     return 69.0 + 12.0 * math.log2(float(np.median(vals)) / 440.0), int(vals.size)
 
 
+def _char_span_cuts(w: dict, sylls: List[str], wstart: float,
+                    wend: float) -> Optional[List[Tuple[float, float]]]:
+    """Cut syllables at forced-alignment per-character acoustic boundaries
+    (word dicts from forced_align carry ``char_spans``/``norm``). Returns None
+    when the syllabifier's characters don't map onto the aligned norm string -
+    caller falls back to proportional spread. Cut times are clamped into the
+    (possibly voiced-snapped) word span and kept monotone."""
+    spans = w.get("char_spans")
+    if not spans:
+        return None
+    from .forced_align import norm_word
+    norm_s = [norm_word(s) for s in sylls]
+    if (not all(norm_s) or "".join(norm_s) != w.get("norm")
+            or len(w["norm"]) != len(spans)):
+        return None
+    cuts = []
+    pos = 0
+    for ns in norm_s:
+        sb = spans[pos][0]
+        pos += len(ns)
+        se = spans[pos - 1][1]
+        cuts.append((sb, se))
+    out: List[Tuple[float, float]] = []
+    for sb, se in cuts:
+        sb = min(max(sb, wstart), wend)
+        se = min(max(se, sb + 1e-3), wend)
+        if out and sb < out[-1][1]:
+            sb = out[-1][1]
+            se = max(se, sb + 1e-3)
+        out.append((sb, se))
+    return out
+
+
 def _snap_to_voiced(times, f0, conf, t0: float, t1: float) -> Tuple[float, float]:
     """Clamp a word span to its voiced frames. Whisper starts words early across
     instrumental gaps; the f0 track knows when the voice actually sounds. Kept
@@ -334,11 +367,15 @@ def assemble(
                              w["start"], max(w["end"], w["start"] + 0.08))
              for w in words]
 
+    # FA-timed words (forced_align) carry char_spans: their onsets are measured,
+    # not attention artifacts, so the count-in re-anchor below is skipped.
+    fa_timed = any("char_spans" in w for w in words)
+
     # re-anchor early first words: whisper timestamps a line's first word at a
     # preceding count-in/instrumental (voiced, so snapping can't reject it).
     # When >= 2 following same-line words agree on a much later time, the line
     # majority wins: pull the word back to just before the second word.
-    if all("line_index" in w for w in words):
+    if not fa_timed and all("line_index" in w for w in words):
         for i in range(len(words) - 2):
             li = words[i]["line_index"]
             if not (words[i + 1]["line_index"] == li == words[i + 2]["line_index"]):
@@ -385,13 +422,18 @@ def assemble(
         # speaker for this word (Phase 1 attribution + Phase 2 per-voice pitch)
         wspk = _word_speaker(diarization, wstart, wend) if diarization else None
         spk_pitch = pps.get(wspk) if wspk is not None else None
+        cuts = _char_span_cuts(w, sylls, wstart, wend)
         weights = [max(1, len(s)) for s in sylls]
         total = sum(weights)
         acc = 0.0
         for si, (s, wt) in enumerate(zip(sylls, weights)):
-            sb = wstart + span * (acc / total)
-            acc += wt
-            se = wstart + span * (acc / total)
+            if cuts:  # acoustic per-character boundaries from forced alignment
+                sb, se = cuts[si]
+                acc += wt
+            else:     # proportional char-weight spread of the word span
+                sb = wstart + span * (acc / total)
+                acc += wt
+                se = wstart + span * (acc / total)
             midi, nfr = None, 0
             track = (times, f0, conf)
             if spk_pitch is not None:

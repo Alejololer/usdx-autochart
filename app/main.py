@@ -17,8 +17,8 @@ import zipfile
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 
-from pipeline import (audio_io, align, assemble, diarize, lyrics, lyrics_api,
-                      metadata, pitch, separate)
+from pipeline import (audio_io, align, assemble, diarize, forced_align,
+                      lyrics, lyrics_api, metadata, pitch, separate)
 from pipeline import usdx_validate, usdx_writer
 
 app = FastAPI(title="usdx-autochart")
@@ -102,8 +102,9 @@ function esc(t){const d=document.createElement('div');d.textContent=t??'';return
 function summary(s,job){
  let h='<b>'+(s.duet?'DUET (P1/P2)':'SOLO')+'</b> — '+s.notes+' notes / '
    +s.lines+' lines, '+Math.round(s.duration||0)+'s<br>';
- h+='lyrics: '+({pasted:'pasted (aligned)',lrclib:'canonical (LRCLIB)'}[s.lyric_source]
-   ||'Whisper transcription')+'<br>';
+ h+='lyrics: '+({pasted:'pasted (aligned)',lrclib:'canonical (LRCLIB)',
+   'pasted+fa':'pasted (forced-aligned)','lrclib+fa':'canonical (forced-aligned)'}
+   [s.lyric_source]||'Whisper transcription')+'<br>';
  h+=s.problems&&s.problems.length
    ?'<span class=bad>problems:<br> - '+s.problems.map(esc).join('<br> - ')+'</span><br>'
    :'<span class=ok>validation OK</span><br>';
@@ -143,12 +144,14 @@ def run_job(job_id: str, audio_path: str, title: str, artist: str,
         # pasted lyrics take precedence over the LRCLIB lookup
         warnings = []
         lyric_source = "whisper"
+        canonical_lines = None
         pasted = [l.strip() for l in lyrics_text.splitlines() if l.strip()]
         if pasted:
             aligned = align.build_words(pasted, words)
             if aligned:
                 words = aligned
                 lyric_source = "pasted"
+                canonical_lines = pasted
             else:
                 warnings.append("pasted lyrics did not align with the audio; "
                                 "ignored")
@@ -159,6 +162,17 @@ def run_job(job_id: str, audio_path: str, title: str, artist: str,
                 if aligned:
                     words = aligned
                     lyric_source = "lrclib"
+                    canonical_lines = canon["lines"]
+
+        # lyrics-first timing: re-time canonical words with forced alignment
+        # (measured onsets + char_spans); sanity-gated, keep in sync with
+        # generate.py
+        if canonical_lines is not None:
+            job["stage"] = "forced-align"
+            fa = forced_align.align_words(canonical_lines, analysis)
+            if fa and forced_align.passes_gate(fa, ptrack):
+                words = fa["words"]
+                lyric_source += "+fa"
         warn = lyrics.low_words_warning(len(words), duration)
         if warn:
             warnings.append(warn)
